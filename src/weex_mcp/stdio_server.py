@@ -6,6 +6,7 @@ from typing import Any, TextIO
 
 from .response import jsonrpc_error
 from .service import LEGACY_PROTOCOL_VERSIONS, McpService, build_default_service
+from .settings import Settings
 from .tenant_context import TenantContext
 
 
@@ -17,7 +18,7 @@ def run_stdio_server(
 ) -> int:
     """Serve newline-delimited MCP JSON-RPC without storing business state."""
 
-    active_service = service or build_default_service()
+    active_service = service or build_default_service(settings=Settings.from_environment())
     input_stream = stdin or sys.stdin
     output_stream = stdout or sys.stdout
     protocol_version: str | None = None

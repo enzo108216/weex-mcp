@@ -104,6 +104,38 @@ class AsgiAppTests(unittest.TestCase):
         self.assertIn("header_mismatch", body.decode())
         self.assertEqual(json.loads(body)["error"]["code"], -32020)
 
+    def test_query_credential_rejection_precedes_protocol_and_body_errors(self):
+        from weex_mcp.asgi_app import build_asgi_app
+
+        cases = (
+            (b'{}', []),
+            (b'{"jsonrpc":', []),
+            (
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": "unsupported-version",
+                    "method": "tools/list",
+                    "params": {},
+                }).encode(),
+                [(b"mcp-protocol-version", b"1900-01-01")],
+            ),
+        )
+        for body_value, headers in cases:
+            with self.subTest(body=body_value, headers=headers):
+                status, response_body, _sent = asyncio.run(
+                    call_asgi(
+                        build_asgi_app(),
+                        body=body_value,
+                        headers=headers,
+                        query_string=b"token=must-not-be-in-url",
+                        modern=False,
+                    )
+                )
+
+                payload = json.loads(response_body)
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "credential_in_query")
+
     def test_asgi_preserves_jsonrpc_parse_error_when_malformed_body_has_no_header(self):
         from weex_mcp.asgi_app import build_asgi_app
 

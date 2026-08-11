@@ -93,13 +93,15 @@ class PlaintextSecretProvider:
         api_key = str(credential_argument["api_key"])
         api_secret = str(credential_argument["api_secret"])
         api_passphrase = str(credential_argument["api_passphrase"])
-        permissions = declared_permissions or frozenset({required_permission})
         return ResolvedWeexCredential(
             key_id="inline",
             api_key=api_key,
             api_secret=api_secret,
             api_passphrase=api_passphrase,
-            permissions=permissions,
+            # Request metadata may narrow a call but cannot prove what WEEX
+            # granted to an inline API key. The signed endpoint adapter adds
+            # verified permissions after authenticating the credential.
+            permissions=frozenset(),
             fingerprint=make_fingerprint("resolved_weex_api_key", api_key),
         )
 

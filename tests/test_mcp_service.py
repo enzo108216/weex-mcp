@@ -4,6 +4,8 @@ import unittest
 
 class McpServiceTests(unittest.TestCase):
     def test_trade_enabled_service_previews_with_plaintext_credential_without_user_context(self):
+        from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
+        from weex_mcp.secret_provider import RequestSecretProvider
         from weex_mcp.service import build_default_service
 
         class MarketRulesAdapter:
@@ -22,9 +24,22 @@ class McpServiceTests(unittest.TestCase):
                     ],
                 }
 
+        private_calls = []
+
+        def transport(prepared, timeout):
+            private_calls.append(prepared)
+            return json.dumps({"canTrade": True, "balances": []}).encode()
+
+        market_adapter = MarketRulesAdapter()
+        trade_adapter = WeexTradeRestAdapter(
+            secret_provider=RequestSecretProvider(),
+            market_adapter=market_adapter,
+            transport=transport,
+        )
         response = build_default_service(
             trade_enabled=True,
-            market_adapter=MarketRulesAdapter(),
+            market_adapter=market_adapter,
+            trade_adapter=trade_adapter,
         ).handle_jsonrpc(
             {
                 "jsonrpc": "2.0",
@@ -54,6 +69,9 @@ class McpServiceTests(unittest.TestCase):
         self.assertTrue(response["result"]["ok"])
         self.assertIn("approval_token", response["result"])
         self.assertNotIn("preview_id", response["result"])
+        self.assertEqual(len(private_calls), 1)
+        self.assertEqual(private_calls[0]["method"], "GET")
+        self.assertEqual(private_calls[0]["url"], "https://api-spot.weex.com/api/v3/account")
         serialized = json.dumps(response, sort_keys=True)
         self.assertNotIn("AK_INLINE", serialized)
         self.assertNotIn("SK_INLINE", serialized)

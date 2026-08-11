@@ -87,7 +87,7 @@ class ApprovalTokenCodec:
         if not _valid_claims(claims):
             raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.")
         now = int(self._time_func())
-        if now > claims["expires_at"]:
+        if now >= claims["expires_at"]:
             raise ApprovalTokenError("approval_token_expired", "Approval token has expired.")
         if claims["issued_at"] > now + 5:
             raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.")

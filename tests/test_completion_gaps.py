@@ -77,7 +77,7 @@ class CompletionGapTests(unittest.TestCase):
         self.assertEqual(response["result"]["error"]["code"], "secret_provider_unconfigured")
         self.assertNotIn("preview_id", response["result"])
 
-    def test_trade_preview_resolves_provider_without_network_request(self):
+    def test_trade_preview_resolves_provider_with_read_only_access_probe(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
         from weex_mcp.service import build_default_service
 
@@ -85,7 +85,10 @@ class CompletionGapTests(unittest.TestCase):
         adapter = WeexTradeRestAdapter(
             secret_provider=FakeSecretProvider(),
             market_adapter=FakeMarketRulesAdapter(),
-            transport=lambda prepared, timeout: network_calls.append(prepared) or b"{}",
+            transport=lambda prepared, timeout: (
+                network_calls.append(prepared)
+                or json.dumps({"canTrade": True, "balances": []}).encode()
+            ),
         )
         response = build_default_service(trade_enabled=True, trade_adapter=adapter).handle_jsonrpc(
             {
@@ -110,7 +113,9 @@ class CompletionGapTests(unittest.TestCase):
         )
 
         self.assertTrue(response["result"]["ok"])
-        self.assertEqual(network_calls, [])
+        self.assertEqual(len(network_calls), 1)
+        self.assertEqual(network_calls[0]["method"], "GET")
+        self.assertEqual(network_calls[0]["url"], "https://api-spot.weex.com/api/v3/account")
 
     def test_trade_preview_fails_when_provider_is_unconfigured(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter

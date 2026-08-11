@@ -8,6 +8,22 @@ service while maintaining the same tool definitions and request contracts.
 The core package has no mandatory runtime dependencies. Optional dependencies
 are provided for the standalone ASGI server and development verification.
 
+## Contents
+
+- [Capabilities](#capabilities)
+- [Installation](#installation)
+- [Runtime modes](#runtime-modes)
+- [Client configuration](#client-configuration)
+- [Protocol compatibility](#protocol-compatibility)
+- [Tool catalog](#tool-catalog)
+- [Credential handling](#credential-handling)
+- [Trade authorization model](#trade-authorization-model)
+- [Project layout](#project-layout)
+- [Development and verification](#development-and-verification)
+- [Troubleshooting](#troubleshooting)
+- [Known issues](#known-issues)
+- [Operational boundary](#operational-boundary)
+
 ## Capabilities
 
 - 17 tools covering market, account, and trade operations.
@@ -96,6 +112,87 @@ weex-mcp serve --host 0.0.0.0 --port 8080 --workers 1
 status. Complete configuration, container, scaling, rotation, and rollback
 requirements are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
+### One-command Docker startup
+
+With Docker Engine and Compose v2 installed, run:
+
+```bash
+./scripts/docker-start.sh
+```
+
+On first run the script creates a private `.env` with two random service
+secrets, keeps Trade disabled, builds the image, starts the container in the
+background, and waits for `/readyz`. It never overwrites an existing `.env`
+and never generates or stores a WEEX user API credential. The default endpoint
+is `http://127.0.0.1:8080/mcp`; the generated service bearer token is in the
+local `.env` file. Stop it with:
+
+```bash
+docker compose down
+```
+
+To use a different host/container port, export `WEEX_MCP_HOST_PORT` and
+`WEEX_MCP_PORT` before the first run, or edit the generated `.env`. For manual
+Compose operation, copy `.env.example` to `.env` and run
+`docker compose up -d --build --wait` after filling both required service
+secret values; the example intentionally leaves them empty so unchanged
+placeholder credentials cannot start the service.
+
+`WEEX_SPOT_BASE_URL` and `WEEX_FUTURES_BASE_URL` select approved deployment
+upstreams for local, staging, or production use. They must be HTTPS origins
+without credentials, paths, query strings, or fragments and are never accepted
+inside a tool request. Public Market GET transport timeouts use bounded retry;
+Account, Trade, HTTP/business, and response-validation failures do not.
+
+## Client configuration
+
+Install the package in an environment visible to the client before using the
+stdio examples. Keep WEEX account credentials out of client configuration;
+Account and Trade tools receive them in the individual tool call only.
+
+### Codex
+
+Register the local stdio server in Codex configuration:
+
+```toml
+[mcp_servers.weex]
+command = "weex-mcp"
+args = ["stdio"]
+```
+
+Restart or reload the MCP client after changing its configuration. The server
+negotiates the Codex-compatible legacy protocol over stdio.
+
+### Claude Code
+
+Add the same stdio command to the project or user MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "weex": {
+      "command": "weex-mcp",
+      "args": ["stdio"]
+    }
+  }
+}
+```
+
+Claude Code negotiates its supported legacy protocol during `initialize`.
+
+### HTTP MCP clients
+
+For Docker or cloud deployments, configure a Streamable HTTP connection with:
+
+```text
+URL: http://127.0.0.1:8080/mcp
+Authorization: Bearer <service-auth-token>
+```
+
+Client-specific HTTP configuration formats vary. The service bearer token
+protects the MCP endpoint; it is separate from the request-scoped WEEX
+credential used by Account and Trade tools. Production URLs must use HTTPS.
+
 ## Protocol compatibility
 
 The HTTP and stdio transports support the following MCP protocol versions:
@@ -152,15 +249,24 @@ headers are optional; absent values resolve to an anonymous internal context.
 
 Trade operations use a stateless preview-and-confirm sequence:
 
-1. A preview request validates credentials, permissions, market rules, and
-   action-specific parameters.
+1. A preview request validates required fields, market rules, and action-specific
+   parameters without private network access. It then authenticates the
+   request-scoped key through a signed, read-only WEEX request and requires
+   `canTrade=true`. Spot uses `GET /api/v3/account`; futures live and demo use
+   `GET /capi/v3/account/accountConfig`.
 2. The response returns a short-lived, HMAC-signed `approval_token`, an
    execution summary, and risk information.
 3. A confirmation request resubmits the complete action parameters, the same
    request-scoped credential, the approval token, and explicit confirmation.
-4. The service resolves the credential again, repeats all pre-execution
-   validation, verifies the signed token binding, and then invokes the write
-   adapter.
+4. The service first validates the token signature and expiry, then resolves
+   the credential again, repeats all pre-execution validation (including the
+   read-only `canTrade` probe), compares the token binding, and only then
+   invokes the write adapter.
+
+The optional `credential.permissions` request field can only narrow a call; it
+does not prove what WEEX granted to the API key. A failed authentication,
+`canTrade=false`, or malformed permission response never produces an approval
+token. Preview itself sends no private write request.
 
 For compatibility with the current tool schema, `confirmation.reply_text`
 uses the exact protocol value `确认`. This value is part of the request contract
@@ -170,7 +276,29 @@ Approval tokens can be replayed until expiry. Order operations therefore
 require a stable `client_order_id` for exchange-side correlation and recovery.
 The package does not claim exactly-once execution semantics.
 
-## Verification
+## Project layout
+
+```text
+src/weex_mcp/       Core service, transports, adapters, schemas, and tools
+tests/              Unit, protocol, package, and runtime contract tests
+scripts/            Docker startup and explicitly authorized smoke helpers
+Dockerfile          Non-root production image definition
+compose.yaml        Local/development one-command HTTP deployment
+DEPLOYMENT.md       Configuration, scaling, security, and rollback contract
+KNOWN_ISSUES.md     Confirmed external defects and their retest boundaries
+```
+
+The installable package contains runtime code only. Deployment and known-issue
+documents remain repository documentation and are not imported by the service.
+
+## Development and verification
+
+Create a Python 3.11+ environment and install all development and server
+dependencies:
+
+```bash
+python -m pip install -e '.[dev,server]'
+```
 
 The repository defines the following local checks:
 
@@ -187,6 +315,34 @@ PYTHONPATH=src python3 -m weex_mcp serve --help
 Unit tests use injected transports and adapters. Network-dependent demo smoke
 execution requires explicit authorization and is not part of the default test
 suite.
+
+Generated `build/`, `dist/`, `*.egg-info/`, virtual environments, `.env`, and
+local logs are ignored. Do not commit real service secrets or WEEX credentials.
+
+## Troubleshooting
+
+- `module_disabled`: Trade is off by default. Enable it only in an explicitly
+  approved environment, then restart the service.
+- `weex-mcp serve` exits with code 2: check the required cloud service secrets,
+  numeric settings, allowed origins, and HTTPS upstream origins.
+- HTTP `/mcp` returns 401: supply the configured service bearer token. This is
+  not a WEEX API key.
+- A modern HTTP request reports `header_mismatch`: send the negotiated
+  `MCP-Protocol-Version` and required modern request metadata, or perform a
+  supported legacy `initialize` first.
+- An approval token becomes invalid after restart or rotation: local instances
+  without an explicit approval secret generate a per-process secret; cloud
+  replicas must share one configured secret. Rotation invalidates old tokens.
+- A Trade result is unknown after a timeout: do not blindly retry. Reconcile by
+  the stable `client_order_id` through a read-only query before any new write.
+- Container readiness fails: run `docker compose config`, inspect `/readyz`, and
+  confirm that the container and published port settings match.
+
+## Known issues
+
+Confirmed external platform defects and their safe retest conditions are
+tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). These records do not constitute
+authorization to submit new trade requests.
 
 ## Operational boundary
 

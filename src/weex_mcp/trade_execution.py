@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-
 # Retained as a protocol literal for compatibility with existing trade clients.
 CONFIRMATION_REPLY_TEXT = "确认"
 

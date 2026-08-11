@@ -20,7 +20,6 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
@@ -35,9 +34,9 @@ from weex_mcp.service import McpService, build_default_service
 from weex_mcp.settings import Settings
 from weex_mcp.tenant_context import TenantContext
 
-
 ALLOWED_DEMO_PRIVATE_REQUESTS = frozenset(
     {
+        ("GET", "/capi/v3/account/accountConfig"),
         ("GET", "/capi/v3/sim/balance"),
         ("GET", "/capi/v3/sim/position/allPosition"),
         ("GET", "/capi/v3/sim/order/history"),
@@ -363,7 +362,7 @@ def run_full_smoke(*, api_key: str, api_secret: str, api_passphrase: str, symbol
         ("account_get_orders", {"market": "spot", "trading_mode": "demo", "status": "history", "symbol": normalized_symbol, "credential": credential}),
         ("account_get_trades", {"market": "futures", "trading_mode": "demo", "symbol": demo_symbol, "credential": credential}),
         ("account_get_bills", {"market": "futures", "trading_mode": "demo", "bill_type": "income", "credential": credential}),
-        ("trade_preview_order", {"market": "spot", "trading_mode": "demo", "symbol": normalized_symbol, "side": "BUY", "order_type": "MARKET", "quantity": quantity, "credential": credential}),
+        ("trade_preview_order", {"market": "spot", "trading_mode": "demo", "symbol": normalized_symbol, "side": "BUY", "order_type": "MARKET", "quantity": quantity, "client_order_id": "unsupported-spot-demo", "credential": credential}),
         ("trade_preview_cancel_order", {"market": "futures", "trading_mode": "demo", "symbol": normalized_symbol, "order_id": "unsupported-demo-order", "credential": credential}),
         ("trade_preview_leverage", {"market": "futures", "trading_mode": "demo", "symbol": normalized_symbol, "margin_mode": "cross", "leverage": "2", "credential": credential}),
         ("trade_preview_margin_mode", {"market": "futures", "trading_mode": "demo", "symbol": normalized_symbol, "margin_mode": "cross", "credential": credential}),

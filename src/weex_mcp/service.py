@@ -278,17 +278,27 @@ def build_default_service(
     trade_adapter: TradeGuardAdapter | None = None,
     audit_sink: AuditSink | None = None,
 ) -> McpService:
+    if trade_enabled is not None and not isinstance(trade_enabled, bool):
+        raise ValueError("trade_enabled must be a boolean.")
     if settings is None:
         settings = Settings(trade_enabled=bool(trade_enabled))
     elif trade_enabled is not None and trade_enabled != settings.trade_enabled:
         settings = replace(settings, trade_enabled=trade_enabled)
     active_secret_provider = secret_provider or RequestSecretProvider()
-    active_market_adapter = market_adapter or WeexMarketRestAdapter(timeout_seconds=settings.market_timeout_seconds)
+    active_market_adapter = market_adapter or WeexMarketRestAdapter(
+        spot_base_url=settings.spot_base_url,
+        futures_base_url=settings.futures_base_url,
+        timeout_seconds=settings.market_timeout_seconds,
+        max_attempts=settings.market_max_attempts,
+        retry_base_delay_seconds=settings.market_retry_base_delay_seconds,
+    )
     active_trade_adapter = trade_adapter
     if active_trade_adapter is None:
         if settings.trade_enabled:
             active_trade_adapter = WeexTradeRestAdapter(
                 secret_provider=active_secret_provider,
+                spot_base_url=settings.spot_base_url,
+                futures_base_url=settings.futures_base_url,
                 timeout_seconds=settings.account_timeout_seconds,
                 market_adapter=active_market_adapter,
             )
@@ -302,7 +312,13 @@ def build_default_service(
             ttl_seconds=settings.approval_token_ttl_seconds,
         ),
         market_adapter=active_market_adapter,
-        account_adapter=account_adapter or WeexAccountRestAdapter(secret_provider=active_secret_provider, timeout_seconds=settings.account_timeout_seconds),
+        account_adapter=account_adapter
+        or WeexAccountRestAdapter(
+            secret_provider=active_secret_provider,
+            spot_base_url=settings.spot_base_url,
+            futures_base_url=settings.futures_base_url,
+            timeout_seconds=settings.account_timeout_seconds,
+        ),
         trade_adapter=active_trade_adapter,
         audit_sink=audit_sink or LoggingAuditSink(),
     )

@@ -187,6 +187,51 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertEqual(changed_credential["error"]["code"], "approval_mismatch")
         self.assertEqual(adapter.execute_calls, 0)
 
+    def test_shared_secret_allows_cross_instance_confirm_and_rotation_fails_closed(self):
+        from weex_mcp.service import build_default_service
+        from weex_mcp.settings import Settings
+
+        shared_settings = Settings(trade_enabled=True, approval_token_secret="s" * 32)
+        preview_adapter = StatelessTradeAdapter()
+        confirm_adapter = StatelessTradeAdapter()
+        preview_service = build_default_service(settings=shared_settings, trade_adapter=preview_adapter)
+        confirm_service = build_default_service(settings=shared_settings, trade_adapter=confirm_adapter)
+        arguments = self._order()
+
+        preview = self._call(preview_service, "trade_preview_order", arguments)
+        confirmed = self._call(
+            confirm_service,
+            "trade_confirm_order",
+            arguments
+            | {
+                "approval_token": preview["approval_token"],
+                "confirmation": {"accepted": True, "reply_text": "确认"},
+            },
+        )
+
+        self.assertTrue(confirmed["ok"])
+        self.assertEqual(preview_adapter.execute_calls, 0)
+        self.assertEqual(confirm_adapter.execute_calls, 1)
+
+        rotated_adapter = StatelessTradeAdapter()
+        rotated_service = build_default_service(
+            settings=Settings(trade_enabled=True, approval_token_secret="r" * 32),
+            trade_adapter=rotated_adapter,
+        )
+        rejected = self._call(
+            rotated_service,
+            "trade_confirm_order",
+            arguments
+            | {
+                "approval_token": preview["approval_token"],
+                "confirmation": {"accepted": True, "reply_text": "确认"},
+            },
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error"]["code"], "approval_token_invalid")
+        self.assertEqual(rotated_adapter.preview_calls, 0)
+        self.assertEqual(rotated_adapter.execute_calls, 0)
+
     def test_all_four_actions_are_fully_rechecked_before_execution(self):
         from weex_mcp.service import build_default_service
 

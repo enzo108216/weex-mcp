@@ -7,12 +7,14 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from ..secret_provider import ResolvedWeexCredential, SecretProvider
+from ..secret_provider import ResolvedWeexCredential, SecretProvider, SecretProviderError
 from ..tenant_context import TenantContext
 from ..trade_execution import TradeExecution, canonical_payload_hash
 from .market import MarketPriceAdapter, WeexMarketRestAdapter
@@ -25,6 +27,10 @@ FUTURES_ORDER_PATH = "/capi/v3/order"
 FUTURES_DEMO_ORDER_PATH = "/capi/v3/sim/order"
 FUTURES_LEVERAGE_PATH = "/capi/v3/account/leverage"
 FUTURES_MARGIN_MODE_PATH = "/capi/v3/account/marginType"
+FUTURES_SYMBOL_CONFIG_PATH = "/capi/v3/account/symbolConfig"
+SPOT_ACCOUNT_CONFIG_PATH = "/api/v3/account"
+FUTURES_ACCOUNT_CONFIG_PATH = "/capi/v3/account/accountConfig"
+SPOT_USDT_MIN_ORDER_VALUE = Decimal("5")
 
 PreparedTransport = Callable[[dict[str, Any], float], bytes]
 
@@ -54,7 +60,11 @@ class WeexTradeRestAdapter:
         self.timeout_seconds = timeout_seconds
         self.transport = transport or _default_transport
         self.time_func = time_func or time.time
-        self.market_adapter = market_adapter or WeexMarketRestAdapter(timeout_seconds=timeout_seconds)
+        self.market_adapter = market_adapter or WeexMarketRestAdapter(
+            spot_base_url=self.spot_base_url,
+            futures_base_url=self.futures_base_url,
+            timeout_seconds=timeout_seconds,
+        )
 
     def preview_order(
         self,
@@ -205,7 +215,7 @@ class WeexTradeRestAdapter:
         credential_argument: dict[str, Any],
         context: TenantContext,
     ) -> dict[str, Any]:
-        self._credential_for_request(credential, credential_argument, context)
+        resolved_credential = self._credential_for_request(credential, credential_argument, context)
         market, trading_mode = _normalize_market_mode(arguments)
         if market != "futures" or trading_mode != "live":
             raise ValueError("Leverage endpoint only supports live futures.")
@@ -218,10 +228,30 @@ class WeexTradeRestAdapter:
         )
         _validate_leverage_rule(leverage, symbol_rule)
         margin_mode = _normalize_margin_mode(arguments.get("margin_mode"))
-        body: dict[str, str] = {"symbol": symbol, "marginType": margin_mode}
+        current_leverages = _extract_symbol_leverages(
+            self._request(
+                market="futures",
+                method="GET",
+                path=FUTURES_SYMBOL_CONFIG_PATH,
+                query={"symbol": symbol},
+                body={},
+                credential=resolved_credential,
+            ),
+            symbol=symbol,
+        )
+        body: dict[str, str] = {
+            "symbol": symbol,
+            "marginType": margin_mode,
+            **current_leverages,
+        }
         position_side = str(arguments.get("position_side") or "").strip().upper()
         if margin_mode == "CROSSED":
-            body["crossLeverage"] = leverage
+            # WEEX separated-position accounts reject cross updates unless all
+            # three leverage fields are populated with the requested value.
+            # The two isolated values are compatibility fillers and are not
+            # applied while marginType is CROSSED.
+            for field in ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage"):
+                body[field] = leverage
         elif position_side == "LONG":
             body["isolatedLongLeverage"] = leverage
         elif position_side == "SHORT":
@@ -275,7 +305,7 @@ class WeexTradeRestAdapter:
                 response_payload=result_payload,
             )
         else:
-            evidence = _has_success_code(payload) or result_payload.get("success") is True
+            evidence = _has_success_code(payload, endpoint=endpoint) or result_payload.get("success") is True
         if not evidence:
             raise WeexRestBusinessError(code="invalid_response", message="WEEX trade mutation response was malformed.", payload=payload)
         return {"status": "accepted", "success": True, "raw": payload}
@@ -285,6 +315,40 @@ class WeexTradeRestAdapter:
 
     def resolve_credential(self, *, credential_argument: dict[str, Any], context: TenantContext) -> ResolvedWeexCredential:
         return self._resolve_trade_credential(credential_argument, context)
+
+    def validate_trade_access(
+        self,
+        *,
+        arguments: dict[str, Any],
+        credential: ResolvedWeexCredential,
+        context: TenantContext,
+    ) -> ResolvedWeexCredential:
+        """Authenticate the request key through a read-only endpoint before preview."""
+
+        market, _ = _normalize_market_mode(arguments)
+        path = SPOT_ACCOUNT_CONFIG_PATH if market == "spot" else FUTURES_ACCOUNT_CONFIG_PATH
+        payload = self._request(
+            market=market,
+            method="GET",
+            path=path,
+            query={},
+            body={},
+            credential=credential,
+        )
+        account_config = _extract_mapping_payload(payload)
+        can_trade = account_config.get("canTrade")
+        if can_trade is False:
+            raise SecretProviderError("permission_denied", "WEEX API key does not allow trading.")
+        if can_trade is not True:
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX account configuration did not contain a boolean canTrade value.",
+                payload=payload,
+            )
+        return replace(
+            credential,
+            permissions=credential.permissions | frozenset({"USER_DATA", "TRADE"}),
+        )
 
     def _credential_for_request(self, credential: Any, credential_argument: dict[str, Any], context: TenantContext) -> Any:
         if isinstance(credential, ResolvedWeexCredential):
@@ -308,7 +372,18 @@ class WeexTradeRestAdapter:
             payload = json.loads(raw_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise WeexRestBusinessError(code="invalid_response", message="WEEX returned malformed JSON.") from exc
-        raise_for_weex_business_error(payload)
+        validation_payload = payload
+        if (
+            path == FUTURES_MARGIN_MODE_PATH
+            and isinstance(payload, dict)
+            and str(payload.get("code") or "") == "200"
+        ):
+            # This endpoint documents HTTP-style ``200`` as its business
+            # success code. Normalize only the outer envelope so nested
+            # ``success=false`` or error codes are still scanned fail-closed.
+            validation_payload = dict(payload)
+            validation_payload["code"] = "0"
+        raise_for_weex_business_error(validation_payload)
         return payload
 
 
@@ -443,6 +518,17 @@ def _validate_order_rules(body: dict[str, Any], rule: dict[str, Any], *, market:
             raise ValueError("quantity exceeds the WEEX precision for this symbol.")
 
     price_value = body.get("price")
+    if (
+        market == "spot"
+        and str(rule.get("quoteAsset") or "").upper() == "USDT"
+        and price_value not in (None, "")
+    ):
+        try:
+            order_value = quantity * Decimal(str(price_value))
+        except (InvalidOperation, ValueError):
+            raise ValueError("Order price is invalid.") from None
+        if order_value < SPOT_USDT_MIN_ORDER_VALUE:
+            raise ValueError("spot USDT order value must be at least 5 USDT.")
     tick_size = rule.get("tickSize")
     if price_value not in (None, "") and tick_size not in (None, ""):
         try:
@@ -711,8 +797,27 @@ def _sign(*, api_secret: str, timestamp_ms: str, method: str, path: str, query_s
 
 def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> bytes:
     request = Request(url=prepared["url"], method=prepared["method"], data=prepared["data"], headers=prepared["headers"])
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            return response.read()
+    except HTTPError as exc:
+        error_body = exc.read()
+        payload: Any | None = None
+        if error_body:
+            try:
+                payload = json.loads(error_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+        if payload is not None:
+            try:
+                raise_for_weex_business_error(payload)
+            except WeexRestBusinessError as business_error:
+                raise business_error from exc
+        raise WeexRestBusinessError(
+            code=f"http_{exc.code}",
+            message="WEEX Trade API returned a non-success HTTP status.",
+            payload=payload,
+        ) from exc
 
 
 def _compact_json(value: dict[str, Any]) -> str:
@@ -727,6 +832,42 @@ def _extract_mapping_payload(payload: Any) -> dict[str, Any]:
     raise WeexRestBusinessError(code="invalid_response", message="WEEX response must be an object.", payload=payload)
 
 
+def _extract_symbol_leverages(payload: Any, *, symbol: str) -> dict[str, str]:
+    data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+    items = data if isinstance(data, list) else [data]
+    config = next(
+        (
+            item
+            for item in items
+            if isinstance(item, dict)
+            and str(item.get("symbol") or "").upper() == symbol.upper()
+        ),
+        None,
+    )
+    if config is None:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX symbol configuration did not contain the requested symbol.",
+            payload=payload,
+        )
+    result: dict[str, str] = {}
+    for field in ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage"):
+        raw_value = config.get(field)
+        normalized = str(raw_value or "").strip()
+        try:
+            value = Decimal(normalized)
+        except (InvalidOperation, ValueError):
+            value = Decimal("NaN")
+        if not value.is_finite() or value <= 0:
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX symbol configuration contained invalid leverage values.",
+                payload=payload,
+            )
+        result[field] = normalized
+    return result
+
+
 def _raise_if_trade_rejected(outer: Any, inner: dict[str, Any]) -> None:
     for candidate in (outer, inner):
         if isinstance(candidate, dict) and candidate.get("success") is False:
@@ -735,8 +876,11 @@ def _raise_if_trade_rejected(outer: Any, inner: dict[str, Any]) -> None:
             raise WeexRestBusinessError(code=code, message=message, payload=outer)
 
 
-def _has_success_code(payload: Any) -> bool:
-    return isinstance(payload, dict) and str(payload.get("code") or "") in SUCCESS_CODES
+def _has_success_code(payload: Any, *, endpoint: str | None = None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    code = str(payload.get("code") or "")
+    return code in SUCCESS_CODES or (endpoint == FUTURES_MARGIN_MODE_PATH and code == "200")
 
 
 def _leverage_response_matches_request(*, request_body: dict[str, Any], response_payload: dict[str, Any]) -> bool:
@@ -748,6 +892,8 @@ def _leverage_response_matches_request(*, request_body: dict[str, Any], response
         return False
     if str(response_payload.get("marginType") or "").upper() != str(margin_type).upper():
         return False
+    if str(margin_type).upper() == "CROSSED":
+        return str(response_payload.get("crossLeverage")) == str(request_body.get("crossLeverage"))
     leverage_fields = ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage")
     expected = [(field, request_body.get(field)) for field in leverage_fields if request_body.get(field) not in (None, "")]
     return bool(expected) and all(str(response_payload.get(field)) == str(value) for field, value in expected)

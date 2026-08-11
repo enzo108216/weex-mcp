@@ -89,6 +89,24 @@ def build_asgi_app(
             await _send_json(send, 413, error_response("request_too_large", "Request body exceeds configured size limit."))
             return
 
+        query_params = {
+            key: values
+            for key, values in parse_qs(
+                (scope.get("query_string") or b"").decode("utf-8", "replace"),
+                keep_blank_values=True,
+            ).items()
+        }
+        if query_params:
+            await _send_json(
+                send,
+                400,
+                error_response(
+                    "credential_in_query",
+                    "Credential material is not allowed in URL query parameters.",
+                ),
+            )
+            return
+
         protocol_version, protocol_error = _resolve_protocol_version(
             body,
             headers,
@@ -98,13 +116,6 @@ def build_asgi_app(
             await _send_json(send, 400, protocol_error)
             return
 
-        query_params = {
-            key: values
-            for key, values in parse_qs(
-                (scope.get("query_string") or b"").decode("utf-8", "replace"),
-                keep_blank_values=True,
-            ).items()
-        }
         response = await asyncio.to_thread(
             handle_mcp_post,
             body,

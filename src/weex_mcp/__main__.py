@@ -44,7 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stdio":
         from .stdio_server import run_stdio_server
 
-        return run_stdio_server()
+        try:
+            return run_stdio_server()
+        except ValueError as exc:
+            print(f"weex-mcp stdio: error: {exc}", file=sys.stderr)
+            return 2
     parser.print_help()
     return 0
 

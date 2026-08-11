@@ -1,0 +1,30 @@
+name: weex-mcp
+
+services:
+  mcp:
+    image: ${WEEX_MCP_IMAGE:-weex-mcp:local}
+    build:
+      context: .
+    env_file:
+      - ${WEEX_MCP_ENV_FILE:-.env}
+    environment:
+      WEEX_APPROVAL_TOKEN_SECRET: ${WEEX_APPROVAL_TOKEN_SECRET:?Set WEEX_APPROVAL_TOKEN_SECRET in the env file}
+      WEEX_SERVICE_AUTH_TOKEN: ${WEEX_SERVICE_AUTH_TOKEN:?Set WEEX_SERVICE_AUTH_TOKEN in the env file}
+      WEEX_TRADE_ENABLED: ${WEEX_TRADE_ENABLED:-false}
+      WEEX_MCP_PORT: ${WEEX_MCP_PORT:-8080}
+    ports:
+      - "${WEEX_MCP_HOST_PORT:-8080}:${WEEX_MCP_PORT:-8080}"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, urllib.request;
+          port = os.environ.get('WEEX_MCP_PORT', '8080');
+          urllib.request.urlopen(f'http://127.0.0.1:{port}/readyz', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 6

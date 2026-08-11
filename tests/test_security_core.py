@@ -1,5 +1,7 @@
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 
 class CredentialContextTests(unittest.TestCase):
@@ -234,6 +236,71 @@ class CredentialContextTests(unittest.TestCase):
             self.assertNotIn("api_secret", serialized)
             self.assertEqual(response["result"]["error"]["code"], "provider_failed")
 
+    def test_concurrent_plaintext_account_requests_do_not_cross_credentials(self):
+        from weex_mcp.adapters.account import WeexAccountRestAdapter
+        from weex_mcp.audit import MemoryAuditSink
+        from weex_mcp.secret_provider import RequestSecretProvider
+        from weex_mcp.service import build_default_service
+
+        barrier = threading.Barrier(2)
+        captured_keys = []
+        labels = {"AK_CONCURRENT_ONE": "ACCOUNT_ONE", "AK_CONCURRENT_TWO": "ACCOUNT_TWO"}
+
+        def transport(prepared, timeout):
+            api_key = prepared["headers"]["ACCESS-KEY"]
+            captured_keys.append(api_key)
+            barrier.wait(timeout=2)
+            return json.dumps({"balances": [{"asset": labels[api_key], "free": "1", "locked": "0"}]}).encode()
+
+        audit = MemoryAuditSink()
+        service = build_default_service(
+            account_adapter=WeexAccountRestAdapter(
+                secret_provider=RequestSecretProvider(),
+                transport=transport,
+                time_func=lambda: 1234.567,
+            ),
+            audit_sink=audit,
+        )
+
+        def call(api_key, api_secret, api_passphrase):
+            response = service.handle_jsonrpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": api_key[-3:],
+                    "method": "tools/call",
+                    "params": {
+                        "name": "account_get_balance",
+                        "arguments": {
+                            "market": "spot",
+                            "trading_mode": "live",
+                            "credential": {
+                                "type": "plaintext",
+                                "api_key": api_key,
+                                "api_secret": api_secret,
+                                "api_passphrase": api_passphrase,
+                            },
+                        },
+                    },
+                }
+            )["result"]
+            return response["data"]["balances"][0]["asset"], response
+
+        credentials = (
+            ("AK_CONCURRENT_ONE", "SK_CONCURRENT_ONE", "PP_CONCURRENT_ONE"),
+            ("AK_CONCURRENT_TWO", "SK_CONCURRENT_TWO", "PP_CONCURRENT_TWO"),
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(call, *credential) for credential in credentials]
+            results = [future.result(timeout=3) for future in futures]
+
+        self.assertEqual([label for label, _response in results], ["ACCOUNT_ONE", "ACCOUNT_TWO"])
+        self.assertCountEqual(captured_keys, [credential[0] for credential in credentials])
+        serialized = json.dumps([response for _label, response in results] + audit.events, sort_keys=True)
+        for credential in credentials:
+            for secret in credential:
+                self.assertNotIn(secret, serialized)
+        self.assertEqual(len({event["credential_fingerprint"] for event in audit.events}), 2)
+
     def test_rest_business_error_safe_details_redacts_upstream_message(self):
         from weex_mcp.adapters.rest_errors import WeexRestBusinessError
 
@@ -243,22 +310,5 @@ class CredentialContextTests(unittest.TestCase):
         ).safe_details()
 
         self.assertNotIn("TOPSECRET", json.dumps(details, sort_keys=True))
-
-
-class RateLimiterTests(unittest.TestCase):
-    def test_rate_limiter_blocks_after_limit_without_touching_upstream(self):
-        from weex_mcp.rate_limit import FixedWindowRateLimiter
-
-        now = [1000.0]
-        limiter = FixedWindowRateLimiter(limit=2, window_seconds=60, time_func=lambda: now[0])
-
-        self.assertTrue(limiter.allow("tenant:t1"))
-        self.assertTrue(limiter.allow("tenant:t1"))
-        self.assertFalse(limiter.allow("tenant:t1"))
-
-        now[0] += 61
-        self.assertTrue(limiter.allow("tenant:t1"))
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,7 @@ jobs:
       - name: Compile sources
         run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src
       - name: Ruff
-        run: ruff check src tests
+        run: ruff check src tests scripts
       - name: Mypy
         run: mypy src/weex_mcp
       - name: Build wheel

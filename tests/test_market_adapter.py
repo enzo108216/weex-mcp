@@ -18,6 +18,163 @@ class FakeMarketAdapter:
 
 
 class MarketAdapterTests(unittest.TestCase):
+    def test_market_adapter_retries_transient_transport_failures_with_bounded_backoff(self):
+        from urllib.error import URLError
+
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+
+        attempts = []
+        delays = []
+
+        def flaky_transport(url, timeout_seconds):
+            attempts.append(url)
+            if len(attempts) < 3:
+                raise TimeoutError("temporary market timeout")
+            return b'{"symbol":"BTCUSDT","price":"1"}'
+
+        try:
+            adapter = WeexMarketRestAdapter(
+                transport=flaky_transport,
+                max_attempts=3,
+                retry_base_delay_seconds=0.01,
+                sleep_func=delays.append,
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+
+        result = adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+
+        self.assertEqual(result["price"], "1")
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(delays, [0.01, 0.02])
+
+        url_attempts = []
+
+        def flaky_url_transport(url, timeout_seconds):
+            url_attempts.append(url)
+            if len(url_attempts) == 1:
+                raise URLError("temporary DNS failure")
+            return b'{"symbol":"BTCUSDT","price":"2"}'
+
+        url_result = WeexMarketRestAdapter(
+            transport=flaky_url_transport,
+            max_attempts=2,
+            retry_base_delay_seconds=0,
+            sleep_func=delays.append,
+        ).get_symbol_price(market="spot", symbol="BTCUSDT")
+        self.assertEqual(url_result["price"], "2")
+        self.assertEqual(len(url_attempts), 2)
+
+    def test_market_adapter_does_not_retry_json_or_shape_failures(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        malformed_json_attempts = []
+        try:
+            malformed_json_adapter = WeexMarketRestAdapter(
+                transport=lambda url, timeout: malformed_json_attempts.append(url) or b"not-json",
+                max_attempts=3,
+                sleep_func=lambda delay: self.fail(f"unexpected retry delay {delay}"),
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+        with self.assertRaises(json.JSONDecodeError):
+            malformed_json_adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+        self.assertEqual(len(malformed_json_attempts), 1)
+
+        malformed_shape_attempts = []
+        try:
+            malformed_shape_adapter = WeexMarketRestAdapter(
+                transport=lambda url, timeout: malformed_shape_attempts.append(url) or b'{"symbol":"BTCUSDT"}',
+                max_attempts=3,
+                sleep_func=lambda delay: self.fail(f"unexpected retry delay {delay}"),
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+        with self.assertRaises(WeexRestBusinessError):
+            malformed_shape_adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+        self.assertEqual(len(malformed_shape_attempts), 1)
+
+    def test_market_adapter_does_not_retry_http_or_business_failures(self):
+        from urllib.error import HTTPError
+
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        http_attempts = []
+
+        def http_failure(url, timeout_seconds):
+            http_attempts.append(url)
+            raise HTTPError(url, 400, "bad request", {}, None)
+
+        try:
+            http_adapter = WeexMarketRestAdapter(
+                transport=http_failure,
+                max_attempts=3,
+                sleep_func=lambda delay: self.fail(f"unexpected retry delay {delay}"),
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+        with self.assertRaises(HTTPError):
+            http_adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+        self.assertEqual(len(http_attempts), 1)
+
+        business_attempts = []
+        try:
+            business_adapter = WeexMarketRestAdapter(
+                transport=lambda url, timeout: business_attempts.append(url)
+                or b'{"code":"400001","msg":"bad symbol"}',
+                max_attempts=3,
+                sleep_func=lambda delay: self.fail(f"unexpected retry delay {delay}"),
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+        with self.assertRaises(WeexRestBusinessError):
+            business_adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+        self.assertEqual(len(business_attempts), 1)
+
+    def test_market_depth_rejects_malformed_price_levels(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        malformed_books = (
+            {"bids": ["not-a-level"], "asks": []},
+            {"bids": [["1"]], "asks": []},
+            {"bids": [["0", "1"]], "asks": []},
+            {"bids": [["1", "NaN"]], "asks": []},
+            {"bids": [], "asks": [["1", "-1"]]},
+        )
+        for book in malformed_books:
+            with self.subTest(book=book):
+                adapter = WeexMarketRestAdapter(transport=lambda url, timeout, book=book: json.dumps(book).encode())
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    adapter.get_depth(market="spot", symbol="BTCUSDT")
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+    def test_market_klines_reject_malformed_rows_and_accept_real_shape(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        malformed_rows = (
+            ["not-a-row"],
+            [[1, "1", "2"]],
+            [[1, "0", "2", "1", "1", "1"]],
+            [[1, "1", "Infinity", "1", "1", "1"]],
+            [[1, "1", "2", "0.5", "1", "-1"]],
+        )
+        for rows in malformed_rows:
+            with self.subTest(rows=rows):
+                adapter = WeexMarketRestAdapter(transport=lambda url, timeout, rows=rows: json.dumps(rows).encode())
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    adapter.get_klines(market="futures", symbol="BTCUSDT", interval="1m")
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+        real_shape = [[1, "1", "2", "0.5", "1.5", "3", 2, "4", 5, "6", "7"]]
+        result = WeexMarketRestAdapter(
+            transport=lambda url, timeout: json.dumps(real_shape).encode()
+        ).get_klines(market="spot", symbol="BTCUSDT", interval="1m")
+        self.assertEqual(result["klines"], real_shape)
+
     def test_market_adapter_rejects_catalog_invalid_depth_and_kline_arguments_before_transport(self):
         from weex_mcp.adapters.market import WeexMarketRestAdapter
 

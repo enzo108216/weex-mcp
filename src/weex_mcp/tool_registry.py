@@ -38,7 +38,7 @@ _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
         "audit": {"type": "object", "description": "Redacted request audit metadata, when applicable."},
         "request_id": {"type": "string"},
         "approval_token": {"type": "string"},
-        "expires_at": {"type": "string"},
+        "expires_at": {"type": "integer", "minimum": 0},
         "summary": {"type": "object"},
         "risk": {"type": "object"},
         "user_confirmation": {"type": "object"},
@@ -75,7 +75,10 @@ _FIELD_DESCRIPTIONS = {
     "price_type": "Futures price source: INDEX or MARK.",
     "interval": "K-line interval supported by the selected market.",
     "limit": "Maximum number of records requested, encoded as a decimal string.",
-    "credential": "Request-scoped WEEX credential: plaintext, credential_ref, or encrypted_envelope.",
+    "credential": (
+        "Request-scoped WEEX credential. The default runtime path is plaintext; "
+        "credential_ref and encrypted_envelope require a custom host resolver."
+    ),
     "status": "Order query mode: open, history, or single.",
     "order_id": "WEEX order identifier.",
     "client_order_id": "Stable caller-supplied order identifier for exchange-side correlation and retry reconciliation.",

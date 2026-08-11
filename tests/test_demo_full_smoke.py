@@ -29,6 +29,7 @@ class DemoFullSmokeSafetyTests(unittest.TestCase):
 
         transport = transport_type(delegate=delegate)
         expected = {
+            ("GET", "/capi/v3/account/accountConfig"),
             ("GET", "/capi/v3/sim/balance"),
             ("GET", "/capi/v3/sim/position/allPosition"),
             ("GET", "/capi/v3/sim/order/history"),
@@ -38,7 +39,7 @@ class DemoFullSmokeSafetyTests(unittest.TestCase):
         for method, path in sorted(expected):
             transport({"method": method, "url": f"https://api-contract.weex.com{path}", "headers": {}, "data": None}, 1.5)
 
-        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(seen), 5)
         self.assertEqual(set(transport.calls), expected)
 
     def test_private_transport_blocks_live_before_delegate(self):

@@ -378,6 +378,12 @@ def _prepare_execution(
             risk=risk,
             risk_signature=str(preview_result["risk_signature"]),
         )
+        resolved = _validate_adapter_access(
+            adapter,
+            resolved=resolved,
+            arguments=arguments,
+            context=context,
+        )
         return execution, resolved, credential
     except TradeAdapterError as exc:
         return error_response(exc.code, exc.message, audit=audit)
@@ -447,6 +453,21 @@ def _resolve_adapter_credential(
         ) from exc
     if not isinstance(resolved, ResolvedWeexCredential) or not resolved.fingerprint:
         raise TradeAdapterError("credential_resolution_failed", "Trade adapter returned an invalid resolved credential.")
+    return resolved
+
+
+def _validate_adapter_access(
+    adapter: TradeGuardAdapter,
+    *,
+    resolved: ResolvedWeexCredential,
+    arguments: dict[str, Any],
+    context: TenantContext,
+) -> ResolvedWeexCredential:
+    access_validator = getattr(adapter, "validate_trade_access", None)
+    if callable(access_validator):
+        resolved = access_validator(arguments=arguments, credential=resolved, context=context)
+        if not isinstance(resolved, ResolvedWeexCredential) or not resolved.fingerprint:
+            raise TradeAdapterError("credential_resolution_failed", "Trade adapter returned an invalid verified credential.")
     if "TRADE" not in resolved.permissions:
         raise TradeAdapterError("permission_denied", "Resolved credential does not allow TRADE.")
     return resolved

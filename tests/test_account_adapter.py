@@ -613,6 +613,51 @@ class AccountAdapterTests(unittest.TestCase):
         self.assertTrue(response["result"]["ok"])
         self.assertEqual(response["result"]["data"]["market"], "spot")
 
+    def test_default_request_provider_signs_plaintext_account_call_without_self_asserted_permission(self):
+        from weex_mcp.adapters.account import WeexAccountRestAdapter
+        from weex_mcp.secret_provider import RequestSecretProvider
+        from weex_mcp.service import build_default_service
+
+        private_calls = []
+
+        def transport(prepared, timeout):
+            private_calls.append(prepared)
+            return b'{"balances": []}'
+
+        adapter = WeexAccountRestAdapter(
+            secret_provider=RequestSecretProvider(),
+            transport=transport,
+        )
+        response = build_default_service(account_adapter=adapter).handle_jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": "account-inline-provider",
+                "method": "tools/call",
+                "params": {
+                    "name": "account_get_balance",
+                    "arguments": {
+                        "market": "spot",
+                        "trading_mode": "live",
+                        "credential": {
+                            "type": "plaintext",
+                            "api_key": "AK_INLINE",
+                            "api_secret": "SK_INLINE",
+                            "api_passphrase": "PP_INLINE",
+                        },
+                    },
+                },
+            }
+        )
+
+        self.assertTrue(response["result"]["ok"])
+        self.assertEqual(len(private_calls), 1)
+        self.assertEqual(private_calls[0]["method"], "GET")
+        self.assertEqual(private_calls[0]["url"], "https://api-spot.weex.com/api/v3/account")
+        serialized = json.dumps(response, sort_keys=True)
+        self.assertNotIn("AK_INLINE", serialized)
+        self.assertNotIn("SK_INLINE", serialized)
+        self.assertNotIn("PP_INLINE", serialized)
+
     def test_account_tool_fails_closed_when_secret_provider_unconfigured(self):
         from weex_mcp.service import build_default_service
         from weex_mcp.tenant_context import TenantContext

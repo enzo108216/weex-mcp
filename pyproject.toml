@@ -46,6 +46,9 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/run_demo_full_smoke.py" = ["E402"]
+
 [tool.mypy]
 python_version = "3.11"
 packages = ["weex_mcp"]

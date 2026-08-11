@@ -74,6 +74,63 @@ class CloudRuntimeTests(unittest.TestCase):
         self.assertNotIn("S" * 48, repr(settings))
         self.assertNotIn("cloud-service-token", repr(settings))
 
+    def test_environment_parses_https_upstreams_and_market_retry_settings(self):
+        from weex_mcp.settings import Settings
+
+        settings = Settings.from_environment(
+            self._cloud_env()
+            | {
+                "WEEX_SPOT_BASE_URL": "https://stg-spotpro-openapi.weex.tech/",
+                "WEEX_FUTURES_BASE_URL": "https://stg-api-contract.weex.tech",
+                "WEEX_MARKET_MAX_ATTEMPTS": "4",
+                "WEEX_MARKET_RETRY_BASE_DELAY_SECONDS": "0.25",
+            },
+            require_cloud=True,
+        )
+
+        self.assertEqual(getattr(settings, "spot_base_url", None), "https://stg-spotpro-openapi.weex.tech")
+        self.assertEqual(getattr(settings, "futures_base_url", None), "https://stg-api-contract.weex.tech")
+        self.assertEqual(getattr(settings, "market_max_attempts", None), 4)
+        self.assertEqual(getattr(settings, "market_retry_base_delay_seconds", None), 0.25)
+
+    def test_environment_rejects_unsafe_weex_upstream_urls(self):
+        from weex_mcp.settings import Settings
+
+        invalid_urls = (
+            "http://stg-api-contract.weex.tech",
+            "https://user:pass@stg-api-contract.weex.tech",
+            "https://stg-api-contract.weex.tech/private/path",
+            "https://stg-api-contract.weex.tech?target=other",
+            "https://stg-api-contract.weex.tech#fragment",
+        )
+        for value in invalid_urls:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "WEEX_FUTURES_BASE_URL"):
+                    Settings.from_environment(
+                        self._cloud_env() | {"WEEX_FUTURES_BASE_URL": value},
+                        require_cloud=True,
+                    )
+
+    def test_default_service_wires_deployment_upstreams_to_all_rest_adapters(self):
+        from weex_mcp.service import build_default_service
+        from weex_mcp.settings import Settings
+
+        try:
+            settings = Settings(
+                trade_enabled=True,
+                spot_base_url="https://stg-spotpro-openapi.weex.tech",
+                futures_base_url="https://stg-api-contract.weex.tech",
+            )
+        except TypeError as exc:
+            self.fail(str(exc))
+        service = build_default_service(settings=settings)
+
+        for adapter in (service.market_adapter, service.account_adapter, service.trade_adapter):
+            with self.subTest(adapter=adapter.__class__.__name__):
+                self.assertEqual(adapter.spot_base_url, settings.spot_base_url)
+                self.assertEqual(adapter.futures_base_url, settings.futures_base_url)
+        self.assertEqual(service.market_adapter.max_attempts, settings.market_max_attempts)
+
     def test_environment_rejects_invalid_values_before_server_start(self):
         from weex_mcp.settings import Settings
 
@@ -83,12 +140,77 @@ class CloudRuntimeTests(unittest.TestCase):
             "WEEX_MAX_REQUEST_BYTES": "-1",
             "WEEX_MARKET_TIMEOUT_SECONDS": "nan",
             "WEEX_ALLOWED_ORIGINS": "*",
+            "WEEX_MARKET_MAX_ATTEMPTS": "0",
+            "WEEX_MARKET_RETRY_BASE_DELAY_SECONDS": "-1",
         }
         for name, value in invalid_values.items():
             with self.subTest(name=name):
                 environment = self._cloud_env() | {name: value}
                 with self.assertRaisesRegex(ValueError, name):
                     Settings.from_environment(environment, require_cloud=True)
+
+    def test_direct_settings_reject_non_integer_market_attempt_counts(self):
+        from weex_mcp.settings import Settings
+
+        for value in (True, 1.5, "3"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "market_max_attempts"):
+                    Settings(market_max_attempts=value)
+
+    def test_direct_settings_reject_invalid_public_configuration(self):
+        from weex_mcp.settings import Settings, SettingsError
+
+        invalid_values = (
+            ("trade_enabled", "false"),
+            ("approval_token_secret", "too-short"),
+            ("approval_token_secret", 123),
+            ("approval_token_ttl_seconds", True),
+            ("approval_token_ttl_seconds", 0),
+            ("approval_token_ttl_seconds", "120"),
+            ("server_name", "   "),
+            ("server_version", ""),
+            ("protocol_version", ""),
+            ("max_request_bytes", True),
+            ("max_request_bytes", 0),
+            ("max_request_bytes", "1024"),
+            ("market_timeout_seconds", True),
+            ("market_timeout_seconds", 0),
+            ("market_timeout_seconds", "5"),
+            ("market_retry_base_delay_seconds", True),
+            ("market_retry_base_delay_seconds", -1),
+            ("market_retry_base_delay_seconds", "0.1"),
+            ("account_timeout_seconds", True),
+            ("account_timeout_seconds", 0),
+            ("account_timeout_seconds", "5"),
+            ("service_auth_token", 123),
+            ("allowed_origins", ["https://mcp.example.com"]),
+            ("allowed_origins", ("*",)),
+        )
+        for name, value in invalid_values:
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(SettingsError, name):
+                    Settings(**{name: value})
+
+    def test_direct_settings_normalizes_public_configuration(self):
+        from weex_mcp.settings import Settings
+
+        settings = Settings(
+            server_name="  embedded-weex-mcp  ",
+            server_version="  1.2.3  ",
+            protocol_version="  2099-01-01  ",
+            allowed_origins=("https://mcp.example.com/", "https://mcp.example.com"),
+        )
+
+        self.assertEqual(settings.server_name, "embedded-weex-mcp")
+        self.assertEqual(settings.server_version, "1.2.3")
+        self.assertEqual(settings.protocol_version, "2099-01-01")
+        self.assertEqual(settings.allowed_origins, ("https://mcp.example.com",))
+
+    def test_default_service_rejects_non_boolean_trade_override(self):
+        from weex_mcp.service import build_default_service
+
+        with self.assertRaisesRegex(ValueError, "trade_enabled"):
+            build_default_service(trade_enabled="false")
 
     def test_service_bearer_rejects_non_ascii_values_for_reliable_http_comparison(self):
         from weex_mcp.settings import Settings

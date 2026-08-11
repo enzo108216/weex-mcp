@@ -49,6 +49,25 @@ class ApprovalTokenTests(unittest.TestCase):
             codec.verify(token)
         self.assertEqual(expired.exception.code, "approval_token_expired")
 
+    def test_verify_rejects_token_at_exact_expiration_instant(self):
+        from weex_mcp.approval_token import ApprovalTokenCodec, ApprovalTokenError
+
+        clock = [1_700_000_000.0]
+        codec = ApprovalTokenCodec(secret="s" * 32, ttl_seconds=120, time_func=lambda: clock[0])
+        token = codec.issue(
+            action="order",
+            credential_fingerprint="fp_123",
+            summary={"action": "order"},
+            risk={"status": "review_required"},
+            risk_signature="risk-1",
+        )
+
+        clock[0] += 120
+        with self.assertRaises(ApprovalTokenError) as expired:
+            codec.verify(token)
+
+        self.assertEqual(expired.exception.code, "approval_token_expired")
+
     def test_issue_rejects_non_json_claims_with_a_stable_error(self):
         from weex_mcp.approval_token import ApprovalTokenCodec, ApprovalTokenError
 

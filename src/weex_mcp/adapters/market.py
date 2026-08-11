@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -72,11 +75,21 @@ class WeexMarketRestAdapter:
         futures_base_url: str = FUTURES_BASE_URL,
         timeout_seconds: float = 5.0,
         transport: Transport | None = None,
+        max_attempts: int = 3,
+        retry_base_delay_seconds: float = 0.1,
+        sleep_func: Callable[[float], None] | None = None,
     ):
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts <= 0:
+            raise ValueError("max_attempts must be a positive integer.")
+        if not math.isfinite(retry_base_delay_seconds) or retry_base_delay_seconds < 0:
+            raise ValueError("retry_base_delay_seconds must be a non-negative finite number.")
         self.spot_base_url = spot_base_url.rstrip("/")
         self.futures_base_url = futures_base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.transport = transport or _default_transport
+        self.max_attempts = max_attempts
+        self.retry_base_delay_seconds = retry_base_delay_seconds
+        self.sleep_func = sleep_func or time.sleep
 
     def get_symbol_price(self, *, market: str, symbol: str, price_type: str | None = None) -> dict[str, Any]:
         normalized_market = _normalize_market(market)
@@ -87,7 +100,7 @@ class WeexMarketRestAdapter:
             symbol=normalized_symbol,
             price_type=normalized_price_type,
         )
-        raw_bytes = self.transport(url, self.timeout_seconds)
+        raw_bytes = self._transport_get(url)
         raw = json.loads(raw_bytes.decode("utf-8"))
         raise_for_weex_business_error(raw)
         price = _extract_price(raw)
@@ -132,6 +145,12 @@ class WeexMarketRestAdapter:
                 message="WEEX depth response did not contain bids and asks lists.",
                 payload=raw,
             )
+        if not _valid_depth_levels(mapping["bids"]) or not _valid_depth_levels(mapping["asks"]):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX depth response contained an invalid price level.",
+                payload=raw,
+            )
         return {
             "market": normalized_market,
             "symbol": normalized_symbol,
@@ -165,6 +184,12 @@ class WeexMarketRestAdapter:
             raise WeexRestBusinessError(
                 code="invalid_response",
                 message="WEEX K-line response was not a list.",
+                payload=raw,
+            )
+        if not all(_valid_kline_row(row) for row in payload):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX K-line response contained an invalid row.",
                 payload=raw,
             )
         return {
@@ -222,10 +247,22 @@ class WeexMarketRestAdapter:
         url = f"{base_url}{path}"
         if query_string:
             url = f"{url}?{query_string}"
-        raw_bytes = self.transport(url, self.timeout_seconds)
+        raw_bytes = self._transport_get(url)
         raw = json.loads(raw_bytes.decode("utf-8"))
         raise_for_weex_business_error(raw)
         return raw
+
+    def _transport_get(self, url: str) -> bytes:
+        for attempt in range(self.max_attempts):
+            try:
+                return self.transport(url, self.timeout_seconds)
+            except HTTPError:
+                raise
+            except (TimeoutError, URLError):
+                if attempt + 1 >= self.max_attempts:
+                    raise
+                self.sleep_func(self.retry_base_delay_seconds * (2**attempt))
+        raise RuntimeError("unreachable market retry state")
 
 
 def _default_transport(url: str, timeout_seconds: float) -> bytes:
@@ -351,3 +388,35 @@ def _contains_symbol(symbols: list[Any], requested_symbol: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _valid_depth_levels(levels: list[Any]) -> bool:
+    return all(
+        isinstance(level, list)
+        and len(level) >= 2
+        and _valid_number(level[0], allow_zero=False)
+        and _valid_number(level[1], allow_zero=False)
+        for level in levels
+    )
+
+
+def _valid_kline_row(row: Any) -> bool:
+    return (
+        isinstance(row, list)
+        and len(row) >= 6
+        and _valid_number(row[0], allow_zero=True)
+        and all(_valid_number(value, allow_zero=False) for value in row[1:5])
+        and _valid_number(row[5], allow_zero=True)
+    )
+
+
+def _valid_number(value: Any, *, allow_zero: bool) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return False
+    if not number.is_finite():
+        return False
+    return number >= 0 if allow_zero else number > 0

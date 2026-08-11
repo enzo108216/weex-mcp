@@ -24,7 +24,11 @@ request body and used only for that request.
 | `WEEX_ALLOWED_ORIGINS` | No | empty | Comma-separated exact HTTP(S) origins. Wildcards, credentials, paths, query strings, and fragments are rejected. Requests without an `Origin` header remain valid for non-browser MCP clients. |
 | `WEEX_MAX_REQUEST_BYTES` | No | `1048576` | Positive maximum request-body size. |
 | `WEEX_MARKET_TIMEOUT_SECONDS` | No | `5` | Positive finite public Market upstream timeout. |
+| `WEEX_MARKET_MAX_ATTEMPTS` | No | `3` | Positive attempt count for idempotent public Market GET requests. |
+| `WEEX_MARKET_RETRY_BASE_DELAY_SECONDS` | No | `0.1` | Non-negative finite base delay for exponential Market GET retry backoff. |
 | `WEEX_ACCOUNT_TIMEOUT_SECONDS` | No | `5` | Positive finite Account/Trade upstream timeout. |
+| `WEEX_SPOT_BASE_URL` | No | `https://api-spot.weex.com` | Deployment-selected Spot HTTPS origin. Paths, credentials, query strings, and fragments are rejected. |
+| `WEEX_FUTURES_BASE_URL` | No | `https://api-contract.weex.com` | Deployment-selected Futures HTTPS origin with the same origin-only validation. |
 | `WEEX_SERVER_NAME` | No | `weex-mcp` | Non-empty service name exposed by health endpoints. |
 
 Do not put either required secret in an image, repository, URL, or command-line
@@ -63,6 +67,43 @@ The image runs as an unprivileged numeric user. Its health check calls
 `/readyz` on `WEEX_MCP_PORT`. To use port 9090, publish `9090:9090` and set
 `-e WEEX_MCP_PORT=9090`; the server and health check then use the same port.
 
+### One-command Compose startup
+
+For a local or development deployment, Docker Compose can generate the
+service-only secrets and wait for readiness:
+
+```bash
+./scripts/docker-start.sh
+```
+
+The first run creates `.env` with mode `0600`, random
+`WEEX_APPROVAL_TOKEN_SECRET` and `WEEX_SERVICE_AUTH_TOKEN`, and
+`WEEX_TRADE_ENABLED=false`. Existing `.env` content is never overwritten.
+The script runs `docker compose up -d --build --wait`; it does not generate,
+read, or persist WEEX user API keys. Set `WEEX_MCP_PORT` for the container
+listen port and `WEEX_MCP_HOST_PORT` for the host-published port before first
+run. Stop the service with `docker compose down`.
+
+For explicit configuration, copy `.env.example` to `.env` and run:
+
+```bash
+docker compose up -d --build --wait
+```
+
+Fill both required service secret values first. They are intentionally empty
+in `.env.example`, so an unchanged example fails closed instead of starting
+with shared placeholder credentials.
+
+To target an approved staging environment, set both upstream origins in the
+deployment environment or env file. They apply together to Market, Account,
+and Trade adapters and cannot be overridden by an MCP tool request. Keep Trade
+disabled until the chosen environment, account permissions, and cleanup plan
+have been verified.
+
+This Compose helper is a local/development convenience. Production still
+requires platform-managed secrets, TLS termination, request-body log
+suppression, and independent rollout/observation controls.
+
 ## MCP request boundary
 
 `POST /mcp` always requires cloud service authorization and allows two protocol
@@ -76,6 +117,14 @@ eras:
   `Mcp-Method`, and `Mcp-Name` for named calls are mandatory;
 - a plaintext credential object in each Account/Trade tool call when that tool
   needs WEEX authentication.
+
+When Trade is enabled, every valid preview and confirm performs a signed
+read-only permission probe before an approval token can be issued or a write
+request can run. Local required-field, market, and action validation happens
+before this probe. Spot probes `GET /api/v3/account`; futures live/demo probe
+`GET /capi/v3/account/accountConfig`. The response must authenticate and contain
+the boolean `canTrade=true`. This adds one private GET to preview and one to
+confirm; readiness never performs this probe.
 
 Legacy requests do not require or receive 2026-only `resultType`, `cacheScope`,
 or `ttlMs` fields. A modern request missing `MCP-Protocol-Version` fails with
@@ -99,6 +148,13 @@ Synchronous WEEX REST adapters are dispatched outside the ASGI event loop.
 Size worker/thread capacity and upstream timeouts for expected concurrency;
 this prevents one slow upstream call from blocking unrelated event-loop work
 but is not an unbounded workload queue.
+
+Only public, idempotent Market GET transport failures (`TimeoutError` and
+non-HTTP URL transport errors) receive bounded exponential-backoff retries.
+HTTP responses, WEEX business errors, invalid JSON, malformed response shapes,
+Account calls, Trade permission probes, and all private/write calls are never
+automatically retried by the MCP. In particular, an unknown Trade write result
+must be reconciled by client order ID before any new write is considered.
 
 This version accepts one approval-token secret at a time. Rotating it
 immediately invalidates outstanding tokens. Coordinate the switch across all

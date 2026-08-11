@@ -21,9 +21,31 @@ class SecretProviderTests(unittest.TestCase):
         self.assertEqual(resolved.api_key, "AK_INLINE")
         self.assertEqual(resolved.api_secret, "SK_INLINE")
         self.assertEqual(resolved.api_passphrase, "PP_INLINE")
-        self.assertIn("USER_DATA", resolved.permissions)
+        self.assertNotIn(
+            "USER_DATA",
+            resolved.permissions,
+            "request-scoped plaintext cannot self-assert verified WEEX permissions",
+        )
         self.assertNotIn("SK_INLINE", str(resolved.safe_audit_dict()))
         self.assertNotIn("PP_INLINE", str(resolved.safe_audit_dict()))
+
+    def test_plaintext_provider_does_not_grant_caller_declared_trade_permission(self):
+        from weex_mcp.secret_provider import PlaintextSecretProvider
+        from weex_mcp.tenant_context import TenantContext
+
+        resolved = PlaintextSecretProvider().resolve(
+            credential_argument={
+                "type": "plaintext",
+                "api_key": "AK_INLINE",
+                "api_secret": "SK_INLINE",
+                "api_passphrase": "PP_INLINE",
+                "permissions": ["TRADE"],
+            },
+            context=TenantContext(tenant_id="mcp", user_id="anonymous", session_id="request"),
+            required_permission="TRADE",
+        )
+
+        self.assertNotIn("TRADE", resolved.permissions)
 
     def test_plaintext_provider_rejects_incomplete_request_credential(self):
         from weex_mcp.secret_provider import PlaintextSecretProvider, SecretProviderError
