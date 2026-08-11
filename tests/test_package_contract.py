@@ -202,7 +202,7 @@ class PackageContractTests(unittest.TestCase):
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 17)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 47)
         self.assertNotIn("resultType", responses[1]["result"])
 
     def test_stdio_cli_honors_trade_enabled_environment_setting(self):

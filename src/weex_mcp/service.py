@@ -18,16 +18,41 @@ from .secret_provider import RequestSecretProvider, SecretProvider
 from .settings import Settings
 from .tenant_context import TenantContext
 from .tool_registry import ToolDefinition, ToolRegistry, build_default_registry
-from .tools.account import get_balance, get_bills, get_orders, get_positions, get_trades
-from .tools.market import get_depth, get_exchange_info, get_klines, get_symbol_price
+from .tools.account import (
+    get_balance,
+    get_bills,
+    get_commission_rate,
+    get_conditional_orders,
+    get_config,
+    get_orders,
+    get_positions,
+    get_symbol_config,
+    get_trades,
+    get_transfer_records,
+)
+from .tools.market import (
+    get_advanced_klines,
+    get_book_ticker,
+    get_catalog,
+    get_depth,
+    get_exchange_info,
+    get_funding_rate,
+    get_klines,
+    get_open_interest,
+    get_recent_trades,
+    get_symbol_price,
+    get_ticker_24h,
+)
 from .tools.trade import (
     confirm_cancel_order,
     confirm_leverage,
     confirm_margin_mode,
+    confirm_mutation,
     confirm_order,
     preview_cancel_order,
     preview_leverage,
     preview_margin_mode,
+    preview_mutation,
     preview_order,
 )
 
@@ -211,6 +236,20 @@ class McpService:
             return get_klines(arguments, adapter=self.market_adapter)
         if name == "market_get_exchange_info":
             return get_exchange_info(arguments, adapter=self.market_adapter)
+        if name == "market_get_ticker_24h":
+            return get_ticker_24h(arguments, adapter=self.market_adapter)
+        if name == "market_get_book_ticker":
+            return get_book_ticker(arguments, adapter=self.market_adapter)
+        if name == "market_get_recent_trades":
+            return get_recent_trades(arguments, adapter=self.market_adapter)
+        if name == "market_get_funding_rate":
+            return get_funding_rate(arguments, adapter=self.market_adapter)
+        if name == "market_get_open_interest":
+            return get_open_interest(arguments, adapter=self.market_adapter)
+        if name == "market_get_advanced_klines":
+            return get_advanced_klines(arguments, adapter=self.market_adapter)
+        if name == "market_get_catalog":
+            return get_catalog(arguments, adapter=self.market_adapter)
 
         if context is None:
             return error_response("unauthorized", "Tenant context is required for this tool.")
@@ -225,6 +264,16 @@ class McpService:
             return get_trades(arguments, context, adapter=self.account_adapter)
         if name == "account_get_bills":
             return get_bills(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_config":
+            return get_config(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_commission_rate":
+            return get_commission_rate(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_symbol_config":
+            return get_symbol_config(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_conditional_orders":
+            return get_conditional_orders(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_transfer_records":
+            return get_transfer_records(arguments, context, adapter=self.account_adapter)
         if name == "trade_preview_order":
             return preview_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
         if name == "trade_preview_cancel_order":
@@ -241,6 +290,28 @@ class McpService:
             return confirm_leverage(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
         if name == "trade_confirm_margin_mode":
             return confirm_margin_mode(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
+        for phase, handler in (("trade_preview_", preview_mutation), ("trade_confirm_", confirm_mutation)):
+            if name.startswith(phase):
+                action = name.removeprefix(phase)
+                if action in {
+                    "batch_order",
+                    "batch_cancel",
+                    "cancel_scope",
+                    "conditional_order",
+                    "conditional_cancel",
+                    "tp_sl",
+                    "close_positions",
+                    "position_margin",
+                    "auto_append_margin",
+                }:
+                    return handler(
+                        arguments,
+                        action=action,
+                        context=context,
+                        trade_enabled=self.settings.trade_enabled,
+                        approval_codec=self.approval_codec,
+                        adapter=self.trade_adapter,
+                    )
         return error_response("unknown_tool", "Unknown tool.")
 
     def _finish_tool(self, tool: ToolDefinition, arguments: dict[str, Any], context: TenantContext | None, result: dict[str, Any]) -> dict[str, Any]:
@@ -285,13 +356,17 @@ def build_default_service(
     elif trade_enabled is not None and trade_enabled != settings.trade_enabled:
         settings = replace(settings, trade_enabled=trade_enabled)
     active_secret_provider = secret_provider or RequestSecretProvider()
-    active_market_adapter = market_adapter or WeexMarketRestAdapter(
-        spot_base_url=settings.spot_base_url,
-        futures_base_url=settings.futures_base_url,
-        timeout_seconds=settings.market_timeout_seconds,
-        max_attempts=settings.market_max_attempts,
-        retry_base_delay_seconds=settings.market_retry_base_delay_seconds,
-    )
+    active_market_adapter: MarketPriceAdapter
+    if market_adapter is not None:
+        active_market_adapter = market_adapter
+    else:
+        active_market_adapter = WeexMarketRestAdapter(
+            spot_base_url=settings.spot_base_url,
+            futures_base_url=settings.futures_base_url,
+            timeout_seconds=settings.market_timeout_seconds,
+            max_attempts=settings.market_max_attempts,
+            retry_base_delay_seconds=settings.market_retry_base_delay_seconds,
+        )
     active_trade_adapter = trade_adapter
     if active_trade_adapter is None:
         if settings.trade_enabled:

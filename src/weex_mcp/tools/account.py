@@ -107,6 +107,89 @@ def get_bills(arguments: dict[str, Any], context: TenantContext, *, adapter: Acc
     )
 
 
+def get_config(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode"),
+        call=lambda credential_argument: adapter.get_config(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
+def get_commission_rate(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode", "symbol"),
+        call=lambda credential_argument: adapter.get_commission_rate(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            symbol=str(arguments["symbol"]),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
+def get_symbol_config(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode"),
+        call=lambda credential_argument: adapter.get_symbol_config(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            symbol=arguments.get("symbol"),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
+def get_conditional_orders(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode", "status"),
+        call=lambda credential_argument: adapter.get_conditional_orders(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            status=str(arguments["status"]),
+            symbol=arguments.get("symbol"),
+            start_time=arguments.get("start_time"),
+            end_time=arguments.get("end_time"),
+            page=arguments.get("page"),
+            limit=arguments.get("limit"),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
+def get_transfer_records(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode"),
+        call=lambda credential_argument: adapter.get_transfer_records(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            coin_id=arguments.get("coin_id"),
+            from_type=arguments.get("from_type"),
+            after=arguments.get("after"),
+            before=arguments.get("before"),
+            limit=arguments.get("limit"),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
 def _call_account_adapter(
     arguments: dict[str, Any],
     context: TenantContext,

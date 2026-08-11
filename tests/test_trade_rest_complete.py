@@ -406,7 +406,7 @@ class TradeRestCompleteTests(unittest.TestCase):
     def test_futures_order_confirm_accepts_outer_success_with_nested_order(self):
         captured = {}
         adapter = self._adapter(
-            {"success": True, "data": {"orderId": "2002", "clientOrderId": "nested-client-id"}},
+            {"success": True, "data": {"orderId": "2002", "clientOrderId": "mcp-client-id"}},
             captured,
         )
         preview = adapter.preview_order(
@@ -424,6 +424,55 @@ class TradeRestCompleteTests(unittest.TestCase):
 
         self.assertEqual(result["exchange_order_id"], "2002")
         self.assertTrue(result["success"])
+
+    def test_order_confirmation_rejects_a_mismatched_returned_client_id(self):
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        captured = {}
+        adapter = self._adapter(
+            {"success": True, "data": {"orderId": "2003", "clientOrderId": "another-client-id"}},
+            captured,
+        )
+        preview = adapter.preview_order(
+            arguments={
+                "market": "futures", "trading_mode": "live", "symbol": "BTCUSDT", "side": "BUY",
+                "position_side": "LONG", "order_type": "MARKET", "quantity": "0.01", "client_order_id": "mcp-client-id",
+            },
+            credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
+        )
+
+        with self.assertRaises(WeexRestBusinessError):
+            adapter.confirm_order(
+                execution=self._preview_record(preview, market="futures", trading_mode="live"),
+                credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
+            )
+
+    def test_futures_cancel_confirmation_rejects_a_mismatched_returned_identifier(self):
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.trade_execution import TradeExecution
+
+        captured = {}
+        adapter = self._adapter({"success": True, "orderId": "2"}, captured)
+        execution = TradeExecution(
+            action="cancel_order",
+            market="futures",
+            trading_mode="live",
+            summary={
+                "action": "cancel_order",
+                "market": "futures",
+                "trading_mode": "live",
+                "endpoint": "/capi/v3/order",
+                "request_query": {"orderId": "1"},
+            },
+            risk={"status": "review_required"},
+            risk_signature="risk",
+        )
+
+        with self.assertRaises(WeexRestBusinessError):
+            adapter.confirm_cancel_order(
+                execution=execution,
+                credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
+            )
 
     def test_spot_preview_enforces_max_trade_amount_boundary(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
@@ -624,7 +673,11 @@ class TradeRestCompleteTests(unittest.TestCase):
     def test_spot_and_futures_live_cancel_requests(self):
         for market, expected_url, response in (
             ("spot", "https://api-spot.weex.com/api/v3/order?orderId=1001", {"orderId": 1001, "status": "CANCELED"}),
-            ("futures", "https://api-contract.weex.com/capi/v3/order?origClientOrderId=client-1", {"success": True}),
+            (
+                "futures",
+                "https://api-contract.weex.com/capi/v3/order?origClientOrderId=client-1",
+                {"orderId": "1001", "origClientOrderId": "client-1", "success": True},
+            ),
         ):
             with self.subTest(market=market):
                 captured = {}
@@ -689,6 +742,40 @@ class TradeRestCompleteTests(unittest.TestCase):
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
         self.assertEqual(ctx.exception.code, "invalid_response")
+
+    def test_futures_cancel_by_client_id_accepts_staging_identity_only_response(self):
+        captured = {}
+        adapter = self._adapter(
+            {
+                "orderId": None,
+                "origClientOrderId": "client-1",
+                "success": True,
+                "errorCode": None,
+                "errorMessage": None,
+            },
+            captured,
+        )
+        preview = adapter.preview_cancel_order(
+            arguments={
+                "market": "futures",
+                "trading_mode": "live",
+                "client_order_id": "client-1",
+            },
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+
+        result = adapter.confirm_cancel_order(
+            execution=self._preview_record(preview, market="futures", trading_mode="live"),
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["client_order_id"], "client-1")
+        self.assertIsNone(result["exchange_order_id"])
 
     def test_futures_leverage_requires_requested_leverage_evidence(self):
         captured = {}

@@ -94,6 +94,27 @@ class TradeGuardAdapter(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def preview_mutation(
+        self,
+        *,
+        action: str,
+        arguments: dict[str, Any],
+        credential: Any,
+        credential_argument: dict[str, Any],
+        context: Any,
+    ) -> dict[str, Any]:
+        ...
+
+    def confirm_mutation(
+        self,
+        *,
+        execution: Any,
+        credential: Any,
+        credential_argument: dict[str, Any],
+        context: Any,
+    ) -> dict[str, Any]:
+        ...
+
 
 class FailClosedTradeAdapter:
     """Fail-closed adapter used when no WEEX execution adapter is configured."""
@@ -152,3 +173,9 @@ class FailClosedTradeAdapter:
         context: Any,
     ) -> dict[str, Any]:
         raise RuntimeError("margin_mode_adapter_not_configured")
+
+    def preview_mutation(self, **_: Any) -> dict[str, Any]:
+        raise TradeAdapterError("adapter_not_configured", "Trade adapter is not configured.")
+
+    def confirm_mutation(self, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("trade_mutation_adapter_not_configured")

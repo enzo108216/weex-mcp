@@ -75,6 +75,105 @@ def get_exchange_info(arguments: dict[str, Any], *, adapter: MarketPriceAdapter)
     )
 
 
+def get_ticker_24h(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market",),
+        call=lambda: adapter.get_ticker_24h(
+            market=str(arguments["market"]).lower(),
+            symbol=_optional_symbol(arguments.get("symbol")),
+        ),
+    )
+
+
+def get_book_ticker(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market",),
+        call=lambda: adapter.get_book_ticker(
+            market=str(arguments["market"]).lower(),
+            symbol=_optional_symbol(arguments.get("symbol")),
+        ),
+    )
+
+
+def get_recent_trades(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market", "symbol"),
+        call=lambda: adapter.get_recent_trades(
+            market=str(arguments["market"]).lower(),
+            symbol=normalize_market_symbol(str(arguments["symbol"])),
+            limit=arguments.get("limit"),
+        ),
+    )
+
+
+def get_funding_rate(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market", "mode"),
+        call=lambda: adapter.get_funding_rate(
+            market=str(arguments["market"]).lower(),
+            mode=str(arguments["mode"]).lower(),
+            symbol=_optional_symbol(arguments.get("symbol")),
+            start_time=arguments.get("start_time"),
+            end_time=arguments.get("end_time"),
+            limit=arguments.get("limit"),
+        ),
+    )
+
+
+def get_open_interest(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market", "symbol"),
+        call=lambda: adapter.get_open_interest(
+            market=str(arguments["market"]).lower(),
+            symbol=normalize_market_symbol(str(arguments["symbol"])),
+        ),
+    )
+
+
+def get_advanced_klines(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market", "kind", "symbol", "interval"),
+        call=lambda: adapter.get_advanced_klines(
+            market=str(arguments["market"]).lower(),
+            kind=str(arguments["kind"]).lower(),
+            symbol=normalize_market_symbol(str(arguments["symbol"])),
+            interval=str(arguments["interval"]),
+            start_time=arguments.get("start_time"),
+            end_time=arguments.get("end_time"),
+            limit=arguments.get("limit"),
+            price_type=arguments.get("price_type"),
+        ),
+    )
+
+
+def get_catalog(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market", "catalog"),
+        call=lambda: adapter.get_catalog(
+            market=str(arguments["market"]).lower(),
+            catalog=str(arguments["catalog"]).lower(),
+        ),
+    )
+
+
+def _call_market_with_fields(arguments: dict[str, Any], *, required: tuple[str, ...], call: Any) -> dict[str, Any]:
+    missing = _missing_fields(arguments, required)
+    if missing:
+        return error_response("missing_fields", "Market query is missing required fields.", details={"fields": missing})
+    return _call_market_adapter(call)
+
+
+def _optional_symbol(value: Any) -> str | None:
+    return normalize_market_symbol(str(value)) if value not in (None, "") else None
+
+
 def _call_market_adapter(call: Any) -> dict[str, Any]:
     try:
         return ok_response(data=call())

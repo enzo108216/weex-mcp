@@ -124,10 +124,32 @@ def _validate_value(*, key: str, value: Any, property_schema: dict[str, Any]) ->
                 raise SchemaValidationError("Tool argument must be a decimal string.", {"field": key}) from None
             if not parsed_decimal.is_finite() or parsed_decimal <= 0:
                 raise SchemaValidationError("Tool argument must be a positive decimal string.", {"field": key})
+        if property_schema.get("x-weex-nonnegativeDecimal"):
+            try:
+                parsed_decimal = Decimal(value.strip())
+            except (InvalidOperation, ValueError):
+                raise SchemaValidationError("Tool argument must be a decimal string.", {"field": key}) from None
+            if not parsed_decimal.is_finite() or parsed_decimal < 0:
+                raise SchemaValidationError("Tool argument must be a non-negative decimal string.", {"field": key})
 
     enum = property_schema.get("enum")
     if enum is not None and value not in enum:
         raise SchemaValidationError("Tool argument is not an allowed value.", {"field": key, "allowed": enum})
+
+    if expected_type == "array" or isinstance(value, list):
+        min_items = property_schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise SchemaValidationError("Tool array argument has too few items.", {"field": key, "minItems": min_items})
+        max_items = property_schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise SchemaValidationError("Tool array argument has too many items.", {"field": key, "maxItems": max_items})
+        if property_schema.get("uniqueItems") is True:
+            if any(value[index] in value[:index] for index in range(len(value))):
+                raise SchemaValidationError("Tool array argument must contain unique items.", {"field": key})
+        item_schema = property_schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                _validate_value(key=f"{key}[{index}]", value=item, property_schema=item_schema)
 
     if expected_type == "object" or isinstance(value, dict):
         properties = property_schema.get("properties") or {}
@@ -188,9 +210,12 @@ def _one_of_is_decidable(value: dict[str, Any], options: list[dict[str, Any]]) -
     Nested oneOf values (such as credential variants) are always validated by
     ``_validate_value``.
     """
-    discriminators: set[str] = set()
+    option_discriminators: list[set[str]] = []
     for option in options:
+        current: set[str] = set()
         for key, property_schema in (option.get("properties") or {}).items():
             if "const" in property_schema or property_schema.get("enum"):
-                discriminators.add(key)
+                current.add(key)
+        option_discriminators.append(current)
+    discriminators = set.intersection(*option_discriminators) if option_discriminators else set()
     return not discriminators or discriminators.issubset(value)

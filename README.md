@@ -26,7 +26,8 @@ are provided for the standalone ASGI server and development verification.
 
 ## Capabilities
 
-- 17 tools covering market, account, and trade operations.
+- 47 typed tools covering public Market data, read-only Account data, and
+  guarded Trade operations (11 Market, 10 Account, and 26 Trade tools).
 - Local stdio transport for MCP client integration.
 - Embeddable service and ASGI application factories for host applications.
 - Standalone Streamable HTTP deployment through Uvicorn.
@@ -213,9 +214,9 @@ stored as user session state.
 
 | Module | Tools | Access model |
 | --- | --- | --- |
-| Market | `market_get_symbol_price`, `market_get_depth`, `market_get_klines`, `market_get_exchange_info` | Public market data |
-| Account | `account_get_balance`, `account_get_positions`, `account_get_orders`, `account_get_trades`, `account_get_bills` | Request-scoped `USER_DATA` credential |
-| Trade | `trade_preview_order`, `trade_confirm_order`, `trade_preview_cancel_order`, `trade_confirm_cancel_order`, `trade_preview_leverage`, `trade_confirm_leverage`, `trade_preview_margin_mode`, `trade_confirm_margin_mode` | Explicit enablement and two-phase confirmation |
+| Market (11) | `market_get_symbol_price`, `market_get_depth`, `market_get_klines`, `market_get_exchange_info`, `market_get_ticker_24h`, `market_get_book_ticker`, `market_get_recent_trades`, `market_get_funding_rate`, `market_get_open_interest`, `market_get_advanced_klines`, `market_get_catalog` | Public market data |
+| Account (10) | `account_get_balance`, `account_get_positions`, `account_get_orders`, `account_get_trades`, `account_get_bills`, `account_get_config`, `account_get_commission_rate`, `account_get_symbol_config`, `account_get_conditional_orders`, `account_get_transfer_records` | Request-scoped `USER_DATA` credential |
+| Trade (26) | Existing order/cancel/leverage/margin-mode pairs plus `batch_order`, `batch_cancel`, `cancel_scope`, `conditional_order`, `conditional_cancel`, `tp_sl`, `close_positions`, `position_margin`, and `auto_append_margin` preview/confirm pairs | Explicit enablement and two-phase confirmation |
 
 Every tool publishes an input schema, output schema, client-facing title,
 module metadata, and MCP risk annotations. Invalid arguments are rejected

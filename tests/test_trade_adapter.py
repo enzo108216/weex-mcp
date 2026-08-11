@@ -326,8 +326,12 @@ class TradeAdapterTests(unittest.TestCase):
 
     def test_demo_adapter_rejects_all_non_order_mutations(self):
         from weex_mcp.adapters.trade_rest import WeexFuturesTradeRestAdapter
+        from weex_mcp.trade_execution import TradeExecution
 
-        adapter = WeexFuturesTradeRestAdapter(secret_provider=FakeSecretProvider())
+        adapter = WeexFuturesTradeRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            transport=lambda prepared, timeout: self.fail("demo-only adapter attempted a live mutation"),
+        )
         mutation_arguments = {
             "market": "futures",
             "trading_mode": "live",
@@ -345,6 +349,41 @@ class TradeAdapterTests(unittest.TestCase):
                         credential_argument=self._credential_argument(),
                         context=self._context(),
                     )
+
+        with self.assertRaises(ValueError):
+            adapter.preview_mutation(
+                action="batch_cancel",
+                arguments={
+                    "market": "futures",
+                    "trading_mode": "live",
+                    "order_ids": ["1"],
+                },
+                credential=self._credential(),
+                credential_argument=self._credential_argument(),
+                context=self._context(),
+            )
+
+        execution = TradeExecution(
+            action="batch_cancel",
+            market="futures",
+            trading_mode="live",
+            summary={
+                "action": "batch_cancel",
+                "market": "futures",
+                "trading_mode": "live",
+                "endpoint": "/capi/v3/batchOrders",
+                "request_body": {"orderIdList": ["1"]},
+            },
+            risk={"status": "review_required"},
+            risk_signature="demo-only-mutation",
+        )
+        with self.assertRaises(ValueError):
+            adapter.confirm_mutation(
+                execution=execution,
+                credential=self._credential(),
+                credential_argument=self._credential_argument(),
+                context=self._context(),
+            )
 
     def test_trigger_fields_are_futures_only_and_validated(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter

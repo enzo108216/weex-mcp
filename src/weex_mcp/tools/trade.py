@@ -23,6 +23,44 @@ _ORDER_REQUIRED_FIELDS = (
 _CANCEL_REQUIRED_FIELDS = ("market", "trading_mode")
 _LEVERAGE_REQUIRED_FIELDS = ("market", "trading_mode", "symbol", "margin_mode", "leverage")
 _MARGIN_MODE_REQUIRED_FIELDS = ("market", "trading_mode", "symbol", "margin_mode")
+_GENERIC_MUTATION_ACTIONS = {
+    "batch_order",
+    "batch_cancel",
+    "cancel_scope",
+    "conditional_order",
+    "conditional_cancel",
+    "tp_sl",
+    "close_positions",
+    "position_margin",
+    "auto_append_margin",
+}
+_GENERIC_MUTATION_REQUIRED_FIELDS = {
+    "batch_order": ("market", "trading_mode", "orders"),
+    "batch_cancel": ("market", "trading_mode"),
+    "cancel_scope": ("market", "trading_mode", "order_kind", "scope"),
+    "conditional_order": (
+        "market",
+        "trading_mode",
+        "symbol",
+        "side",
+        "position_side",
+        "conditional_type",
+        "quantity",
+        "trigger_price",
+        "client_algo_id",
+    ),
+    "conditional_cancel": ("market", "trading_mode", "order_id"),
+    "tp_sl": ("market", "trading_mode", "operation", "trigger_price"),
+    "close_positions": ("market", "trading_mode", "scope"),
+    "position_margin": (
+        "market",
+        "trading_mode",
+        "isolated_position_id",
+        "amount",
+        "adjustment",
+    ),
+    "auto_append_margin": ("market", "trading_mode", "position_id", "enabled"),
+}
 
 
 def preview_order(
@@ -203,6 +241,53 @@ def confirm_margin_mode(
     )
 
 
+def preview_mutation(
+    arguments: dict[str, Any],
+    *,
+    action: str,
+    context: TenantContext,
+    trade_enabled: bool,
+    approval_codec: ApprovalTokenCodec,
+    adapter: TradeGuardAdapter,
+) -> dict[str, Any]:
+    if action not in _GENERIC_MUTATION_ACTIONS:
+        return error_response("invalid_arguments", "Unsupported trade mutation action.", audit=context.audit_dict())
+    return _preview_trade_action(
+        arguments,
+        context=context,
+        trade_enabled=trade_enabled,
+        approval_codec=approval_codec,
+        adapter=adapter,
+        action=action,
+        required_fields=_GENERIC_MUTATION_REQUIRED_FIELDS[action],
+        preview_method="preview_mutation",
+    )
+
+
+def confirm_mutation(
+    arguments: dict[str, Any],
+    *,
+    action: str,
+    context: TenantContext,
+    trade_enabled: bool,
+    approval_codec: ApprovalTokenCodec,
+    adapter: TradeGuardAdapter,
+) -> dict[str, Any]:
+    if action not in _GENERIC_MUTATION_ACTIONS:
+        return error_response("invalid_arguments", "Unsupported trade mutation action.", audit=context.audit_dict())
+    return _confirm_trade_action(
+        arguments,
+        context=context,
+        trade_enabled=trade_enabled,
+        approval_codec=approval_codec,
+        adapter=adapter,
+        action=action,
+        required_fields=_GENERIC_MUTATION_REQUIRED_FIELDS[action],
+        preview_method="preview_mutation",
+        confirm_method="confirm_mutation",
+    )
+
+
 def _preview_trade_action(
     arguments: dict[str, Any],
     *,
@@ -340,7 +425,7 @@ def _prepare_execution(
     except CredentialError as exc:
         return error_response(exc.code, exc.message, audit=context.audit_dict())
     audit = context.audit_dict() | credential.safe_audit_dict()
-    missing = [field for field in required_fields if not arguments.get(field)]
+    missing = [field for field in required_fields if _is_missing(arguments, field)]
     if action == "order":
         if str(arguments.get("market") or "").strip().lower() in {"futures", "contract"} and not arguments.get("position_side"):
             missing.append("position_side")
@@ -348,6 +433,36 @@ def _prepare_execution(
             missing.extend(field for field in ("price", "time_in_force") if not arguments.get(field))
     if action == "update_leverage" and str(arguments.get("margin_mode") or "").strip().lower() == "isolated" and not arguments.get("position_side"):
         missing.append("position_side")
+    if action == "batch_cancel" and not arguments.get("order_ids") and not arguments.get("client_order_ids"):
+        missing.extend(("order_ids", "client_order_ids"))
+    if action == "cancel_scope":
+        scope = str(arguments.get("scope") or "").strip().lower()
+        if scope == "symbol" and _is_missing(arguments, "symbol"):
+            missing.append("symbol")
+        if scope == "all" and arguments.get("acknowledge_all_symbols") is not True:
+            missing.append("acknowledge_all_symbols")
+    if action == "conditional_order" and str(arguments.get("conditional_type") or "").strip().upper() in {"STOP", "TAKE_PROFIT"} and _is_missing(arguments, "price"):
+        missing.append("price")
+    if action == "tp_sl":
+        operation = str(arguments.get("operation") or "").strip().lower()
+        if operation == "place":
+            missing.extend(
+                field
+                for field in ("symbol", "client_algo_id", "plan_type", "position_side")
+                if _is_missing(arguments, field)
+            )
+            if _is_missing(arguments, "quantity") and arguments.get("acknowledge_full_position") is not True:
+                missing.append("quantity_or_acknowledge_full_position")
+        elif operation == "modify" and _is_missing(arguments, "order_id"):
+            missing.append("order_id")
+    if action == "close_positions":
+        scope = str(arguments.get("scope") or "").strip().lower()
+        if scope == "position" and _is_missing(arguments, "position_id"):
+            missing.append("position_id")
+        if scope == "symbol" and _is_missing(arguments, "symbol"):
+            missing.append("symbol")
+        if scope == "all" and arguments.get("acknowledge_all_positions") is not True:
+            missing.append("acknowledge_all_positions")
     if missing:
         return error_response(
             "missing_fields",
@@ -362,12 +477,16 @@ def _prepare_execution(
             credential_argument=dict(arguments["credential"]),
             context=context,
         )
-        preview_result = getattr(adapter, preview_method)(
-            arguments=arguments,
-            credential=resolved,
-            credential_argument=dict(arguments["credential"]),
-            context=context,
-        )
+        preview_call = getattr(adapter, preview_method)
+        preview_kwargs = {
+            "arguments": arguments,
+            "credential": resolved,
+            "credential_argument": dict(arguments["credential"]),
+            "context": context,
+        }
+        if preview_method == "preview_mutation":
+            preview_kwargs["action"] = action
+        preview_result = preview_call(**preview_kwargs)
         summary = _validated_preview_summary(preview_result, action=action, arguments=arguments)
         risk = _validated_preview_risk(preview_result)
         execution = TradeExecution(
@@ -405,6 +524,10 @@ def _prepare_execution(
             details={"reason": exc.__class__.__name__},
             audit=audit,
         )
+
+
+def _is_missing(arguments: dict[str, Any], field: str) -> bool:
+    return field not in arguments or arguments[field] is None or arguments[field] == ""
 
 
 def _claims_match_execution(
@@ -493,8 +616,10 @@ def _validated_preview_summary(preview_result: Any, *, action: str, arguments: d
         raise WeexRestBusinessError(code="invalid_response", message="Trade adapter preview trading mode binding is invalid.")
     if not isinstance(summary.get("endpoint"), str) or not summary["endpoint"].strip():
         raise WeexRestBusinessError(code="invalid_response", message="Trade adapter preview did not contain an execution endpoint.")
-    binding_field = "request_query" if action == "cancel_order" else "request_body"
-    if not isinstance(summary.get(binding_field), dict) or not summary[binding_field]:
+    query_actions = {"cancel_order", "cancel_scope", "conditional_cancel"}
+    binding_field = "request_query" if action in query_actions else "request_body"
+    binding = summary.get(binding_field)
+    if not isinstance(binding, dict) or (not binding and action != "cancel_scope"):
         raise WeexRestBusinessError(
             code="invalid_response",
             message=f"Trade adapter preview did not contain the execution {binding_field}.",

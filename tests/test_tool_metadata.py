@@ -6,7 +6,7 @@ class ToolMetadataContractTests(unittest.TestCase):
         from weex_mcp.tool_registry import build_default_registry
 
         tools = build_default_registry().list_tools()
-        self.assertEqual(len(tools), 17)
+        self.assertEqual(len(tools), 47)
         for tool in tools:
             with self.subTest(tool=tool["name"]):
                 self.assertIsInstance(tool.get("title"), str)
@@ -28,13 +28,33 @@ class ToolMetadataContractTests(unittest.TestCase):
             "trade_preview_cancel_order",
             "trade_preview_leverage",
             "trade_preview_margin_mode",
+            "trade_preview_batch_order",
+            "trade_preview_batch_cancel",
+            "trade_preview_cancel_scope",
+            "trade_preview_conditional_order",
+            "trade_preview_conditional_cancel",
+            "trade_preview_tp_sl",
+            "trade_preview_close_positions",
+            "trade_preview_position_margin",
+            "trade_preview_auto_append_margin",
         ):
             self.assertFalse(tools[name]["annotations"]["destructiveHint"])
+            self.assertTrue(tools[name]["annotations"]["readOnlyHint"])
+            self.assertTrue(tools[name]["annotations"]["idempotentHint"])
         for name in (
             "trade_confirm_order",
             "trade_confirm_cancel_order",
             "trade_confirm_leverage",
             "trade_confirm_margin_mode",
+            "trade_confirm_batch_order",
+            "trade_confirm_batch_cancel",
+            "trade_confirm_cancel_scope",
+            "trade_confirm_conditional_order",
+            "trade_confirm_conditional_cancel",
+            "trade_confirm_tp_sl",
+            "trade_confirm_close_positions",
+            "trade_confirm_position_margin",
+            "trade_confirm_auto_append_margin",
         ):
             self.assertTrue(tools[name]["annotations"]["destructiveHint"])
             self.assertFalse(
@@ -48,9 +68,15 @@ class ToolMetadataContractTests(unittest.TestCase):
         for tool in build_default_registry().list_tools():
             properties = tool["inputSchema"].get("properties", {})
             with self.subTest(tool=tool["name"]):
+                self.assertNotEqual(tool["title"], tool["name"])
                 for field in ("market", "trading_mode", "credential"):
                     if field in properties:
                         self.assertTrue(properties[field].get("description"))
+
+                self.assertTrue(
+                    all(isinstance(schema.get("description"), str) and schema["description"].strip() for schema in properties.values()),
+                    "every top-level input field must be described for MCP clients",
+                )
 
     def test_credential_description_names_plaintext_as_default_runtime_path(self):
         from weex_mcp.tool_registry import build_default_registry

@@ -142,7 +142,7 @@ class McpProtocolContractTests(unittest.TestCase):
                     protocol_version=version,
                 )
 
-                self.assertEqual(len(listed["result"]["tools"]), 17)
+                self.assertEqual(len(listed["result"]["tools"]), 47)
                 self.assertNotIn("resultType", listed["result"])
                 self.assertNotIn("cacheScope", listed["result"])
                 self.assertNotIn("ttlMs", listed["result"])
