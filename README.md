@@ -21,6 +21,7 @@ are provided for the standalone ASGI server and development verification.
 - [Project layout](#project-layout)
 - [Development and verification](#development-and-verification)
 - [Troubleshooting](#troubleshooting)
+- [Known issues](#known-issues)
 - [Operational boundary](#operational-boundary)
 
 ## Capabilities
@@ -299,10 +300,11 @@ scripts/            Docker startup and explicitly authorized smoke helpers
 Dockerfile          Non-root production image definition
 compose.yaml        Local/development one-command HTTP deployment
 DEPLOYMENT.md       Configuration, scaling, security, and rollback contract
+KNOWN_ISSUES.md     Confirmed external defects and their retest boundaries
 ```
 
-The installable package contains runtime code only. Deployment documentation is
-not imported by the service.
+The installable package contains runtime code only. Deployment and known-issue
+documents remain repository documentation and are not imported by the service.
 
 ## Development and verification
 
@@ -350,6 +352,12 @@ local logs are ignored. Do not commit real service secrets or WEEX credentials.
   the stable `client_order_id` through a read-only query before any new write.
 - Container readiness fails: run `docker compose config`, inspect `/readyz`, and
   confirm that the container and published port settings match.
+
+## Known issues
+
+Confirmed external platform defects and their safe retest conditions are
+tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). These records do not constitute
+authorization to submit new trade requests.
 
 ## Operational boundary
 

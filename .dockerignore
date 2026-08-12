@@ -23,8 +23,6 @@ secrets
 demo-smoke-*.json
 tests
 scripts
-KNOWN_ISSUES.md
-known_issues.md
 plans
 memory
 需求资源

@@ -50,6 +50,21 @@ class PackageContractTests(unittest.TestCase):
             with self.subTest(required_text=required_text):
                 self.assertIn(required_text, readme)
 
+    def test_external_staging_defect_has_a_complete_handoff_record(self):
+        defect_record = ROOT / "KNOWN_ISSUES.md"
+        self.assertTrue(defect_record.is_file())
+        contents = defect_record.read_text()
+        for required_text in (
+            "Reproduction conditions",
+            "Evidence and impact",
+            "Owner",
+            "Temporary handling",
+            "Retest conditions",
+            "Do not submit another write request",
+        ):
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, contents)
+
     def test_cloud_delivery_files_and_dual_mode_usage_are_documented(self):
         self.assertTrue((ROOT / "Dockerfile").is_file())
         self.assertTrue((ROOT / ".dockerignore").is_file())

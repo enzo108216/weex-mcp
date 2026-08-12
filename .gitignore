@@ -27,8 +27,6 @@ demo-smoke-*.json
 
 # Local planning and delivery artifacts
 MANIFEST.md
-KNOWN_ISSUES.md
-known_issues.md
 memory/
 plans/
 uv.lock
