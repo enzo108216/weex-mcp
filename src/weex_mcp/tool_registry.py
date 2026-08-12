@@ -38,7 +38,7 @@ _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "audit": {"type": "object", "description": "Redacted request audit metadata, when applicable."},
         "request_id": {"type": "string"},
-        "approval_token": {"type": "string"},
+        "preview_id": {"type": "string"},
         "expires_at": {"type": "integer", "minimum": 0},
         "summary": {"type": "object"},
         "risk": {"type": "object"},
@@ -140,7 +140,8 @@ _FIELD_DESCRIPTIONS = {
     "sl_trigger_price": "Optional stop-loss trigger price.",
     "tp_working_type": "Take-profit trigger source: MARK_PRICE or CONTRACT_PRICE.",
     "sl_working_type": "Stop-loss trigger source: MARK_PRICE or CONTRACT_PRICE.",
-    "approval_token": "Short-lived signed token returned by the matching stateless trade precheck.",
+    "preview_id": "Short-lived signed confirmation credential returned by the matching trade preview.",
+    "approval_token": "Deprecated alias for preview_id accepted during client migration.",
     "confirmation": "Explicit confirmation object; accepted must be true and reply_text must match the schema constant.",
     "margin_mode": "Futures margin mode: cross or isolated.",
     "leverage": "Requested futures leverage as a positive decimal string.",
@@ -1238,56 +1239,56 @@ def build_default_registry() -> ToolRegistry:
                 name="trade_preview_order",
                 module="trade",
                 permission="TRADE",
-                description="Precheck an order and return a short-lived signed approval_token without server-side state.",
+                description="Precheck an order and return a short-lived signed preview_id without server-side state.",
                 input_schema=trade_preview_schema,
             ),
             ToolDefinition(
                 name="trade_confirm_order",
                 module="trade",
                 permission="TRADE",
-                description="Recheck a complete order request, validate its approval_token, then execute it.",
+                description="Recheck a complete order request, validate its preview_id, then execute it.",
                 input_schema=trade_confirm_schema,
             ),
             ToolDefinition(
                 name="trade_preview_cancel_order",
                 module="trade",
                 permission="TRADE",
-                description="Precheck an order cancellation and return a short-lived signed approval_token.",
+                description="Precheck an order cancellation and return a short-lived signed preview_id.",
                 input_schema=trade_cancel_preview_schema,
             ),
             ToolDefinition(
                 name="trade_confirm_cancel_order",
                 module="trade",
                 permission="TRADE",
-                description="Recheck a complete cancellation request, validate its approval_token, then execute it.",
+                description="Recheck a complete cancellation request, validate its preview_id, then execute it.",
                 input_schema=trade_cancel_confirm_schema,
             ),
             ToolDefinition(
                 name="trade_preview_leverage",
                 module="trade",
                 permission="TRADE",
-                description="Precheck a futures leverage update and return a short-lived signed approval_token.",
+                description="Precheck a futures leverage update and return a short-lived signed preview_id.",
                 input_schema=trade_leverage_preview_schema,
             ),
             ToolDefinition(
                 name="trade_confirm_leverage",
                 module="trade",
                 permission="TRADE",
-                description="Recheck a complete leverage request, validate its approval_token, then execute it.",
+                description="Recheck a complete leverage request, validate its preview_id, then execute it.",
                 input_schema=trade_leverage_confirm_schema,
             ),
             ToolDefinition(
                 name="trade_preview_margin_mode",
                 module="trade",
                 permission="TRADE",
-                description="Precheck a futures margin-mode update and return a short-lived signed approval_token.",
+                description="Precheck a futures margin-mode update and return a short-lived signed preview_id.",
                 input_schema=trade_margin_mode_preview_schema,
             ),
             ToolDefinition(
                 name="trade_confirm_margin_mode",
                 module="trade",
                 permission="TRADE",
-                description="Recheck a complete margin-mode request, validate its approval_token, then execute it.",
+                description="Recheck a complete margin-mode request, validate its preview_id, then execute it.",
                 input_schema=trade_margin_mode_confirm_schema,
             ),
             ToolDefinition(name="trade_preview_batch_order", module="trade", permission="TRADE", description="Precheck a Spot or Futures batch order without writing.", input_schema=trade_batch_order_preview_schema),
@@ -1314,9 +1315,24 @@ def build_default_registry() -> ToolRegistry:
 
 def _confirmation_schema(base_schema: dict[str, Any], confirmation_schema: dict[str, Any]) -> dict[str, Any]:
     schema = deepcopy(base_schema)
-    schema["required"] = [*schema.get("required", []), "approval_token", "confirmation"]
+    schema["required"] = [*schema.get("required", []), "confirmation"]
+    schema["properties"]["preview_id"] = {"type": "string", "minLength": 1}
     schema["properties"]["approval_token"] = {"type": "string", "minLength": 1}
     schema["properties"]["confirmation"] = deepcopy(confirmation_schema)
+    schema.setdefault("allOf", []).append(
+        {
+            "oneOf": [
+                {
+                    "required": ["preview_id"],
+                    "not": {"required": ["approval_token"]},
+                },
+                {
+                    "required": ["approval_token"],
+                    "not": {"required": ["preview_id"]},
+                },
+            ]
+        }
+    )
     return schema
 
 

@@ -236,7 +236,12 @@ class WeexAccountRestAdapter:
             required_permission="USER_DATA",
         )
         path = _orders_path(market=normalized_market, trading_mode=normalized_mode, status=normalized_status)
-        query = _build_orders_query(market=normalized_market, status=normalized_status, filters=dict(filters))
+        query = _build_orders_query(
+            market=normalized_market,
+            trading_mode=normalized_mode,
+            status=normalized_status,
+            filters=dict(filters),
+        )
         payload = self._signed_request(market=normalized_market, method="GET", path=path, query=query, body={}, credential=credential)
         result = _normalize_private_resource(
             market=normalized_market,
@@ -812,6 +817,14 @@ def _normalize_demo_symbol_for_display(symbol: str) -> str:
     return normalized or ""
 
 
+def _normalize_demo_symbol_for_request(symbol: str) -> str:
+    normalized = _normalize_symbol(symbol)
+    assert normalized is not None
+    if normalized.endswith("USDT") and not normalized.endswith("SUSDT"):
+        return f"{normalized[:-4]}SUSDT"
+    return normalized
+
+
 def _normalize_account_symbol(symbol: str, *, trading_mode: str) -> str:
     normalized = _normalize_symbol(symbol)
     assert normalized is not None
@@ -861,7 +874,7 @@ def _filter_query(filters: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _build_orders_query(*, market: str, status: str, filters: dict[str, Any]) -> dict[str, Any]:
+def _build_orders_query(*, market: str, trading_mode: str, status: str, filters: dict[str, Any]) -> dict[str, Any]:
     if status == "single":
         query: dict[str, Any] = {}
         _put_if_present(query, "orderId", filters.get("order_id"))
@@ -886,7 +899,12 @@ def _build_orders_query(*, market: str, status: str, filters: dict[str, Any]) ->
         return query
     if status == "history":
         query = {}
-        _put_if_present(query, "symbol", _normalize_symbol(filters.get("symbol")) if filters.get("symbol") else None)
+        symbol = filters.get("symbol")
+        if symbol and market == "futures" and trading_mode == "demo":
+            symbol = _normalize_demo_symbol_for_request(str(symbol))
+        elif symbol:
+            symbol = _normalize_symbol(str(symbol))
+        _put_if_present(query, "symbol", symbol)
         for source, target in (
             ("start_time", "startTime"),
             ("end_time", "endTime"),

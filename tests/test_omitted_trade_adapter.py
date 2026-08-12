@@ -249,6 +249,10 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             path = "/" + prepared["url"].split("/", 3)[3].split("?", 1)[0]
             if path == "/capi/v3/account/position/allPosition":
                 return json.dumps(next(position_reads)).encode()
+            if path == "/capi/v3/batchOrders" and prepared["method"] == "DELETE":
+                return json.dumps([{"orderId": "1", "success": True}]).encode()
+            if path == "/capi/v3/allOpenOrders":
+                return json.dumps([{"orderId": "1", "success": True}]).encode()
             return json.dumps(responses[path]).encode()
 
         adapter, provider = self._adapter(transport)
@@ -261,6 +265,9 @@ class OmittedTradeAdapterTests(unittest.TestCase):
         executions = [
             ("batch_order", "spot", "/api/v3/order/batch", "POST", {"symbol": "BTCUSDT", "orderList": [{"newClientOrderId": "a"}]}, {}),
             ("batch_order", "futures", "/capi/v3/batchOrders", "POST", {"batchOrders": [{"newClientOrderId": "a"}]}, {}),
+            ("batch_cancel", "futures", "/capi/v3/batchOrders", "DELETE", {"orderIdList": ["1"]}, {}),
+            ("cancel_scope", "futures", "/capi/v3/allOpenOrders", "DELETE", {}, {"symbol": "BTCUSDT"}),
+            ("conditional_order", "futures", "/capi/v3/algoOrder", "POST", {"clientAlgoId": "a"}, {}),
             ("conditional_cancel", "futures", "/capi/v3/algoOrder", "DELETE", {}, {"orderId": "1"}),
             ("tp_sl", "futures", "/capi/v3/placeTpSlOrder", "POST", {"clientAlgoId": "a"}, {}),
             ("tp_sl", "futures", "/capi/v3/modifyTpSlOrder", "POST", {"orderId": "1"}, {}),
@@ -291,13 +298,16 @@ class OmittedTradeAdapterTests(unittest.TestCase):
 
         self.assertEqual(
             [call["method"] for call in calls],
-            ["POST", "POST", "DELETE", "POST", "POST", "POST", "GET", "POST", "GET", "GET", "POST", "GET"],
+            ["POST", "POST", "DELETE", "DELETE", "POST", "DELETE", "POST", "POST", "POST", "GET", "POST", "GET", "GET", "POST", "GET"],
         )
         self.assertEqual(
             ["/" + call["url"].split("/", 3)[3].split("?", 1)[0] for call in calls],
             [
                 "/api/v3/order/batch",
                 "/capi/v3/batchOrders",
+                "/capi/v3/batchOrders",
+                "/capi/v3/allOpenOrders",
+                "/capi/v3/algoOrder",
                 "/capi/v3/algoOrder",
                 "/capi/v3/placeTpSlOrder",
                 "/capi/v3/modifyTpSlOrder",
@@ -310,6 +320,25 @@ class OmittedTradeAdapterTests(unittest.TestCase):
                 "/capi/v3/account/position/allPosition",
             ],
         )
+        write_calls = [call for call in calls if call["method"] != "GET"]
+        self.assertEqual(
+            [json.loads(call["data"].decode()) if call["data"] else None for call in write_calls],
+            [
+                {"orderList": [{"newClientOrderId": "a"}], "symbol": "BTCUSDT"},
+                {"batchOrders": [{"newClientOrderId": "a"}]},
+                {"orderIdList": ["1"]},
+                None,
+                {"clientAlgoId": "a"},
+                None,
+                {"clientAlgoId": "a"},
+                {"orderId": "1"},
+                {"positionId": "7"},
+                {"amount": "1", "isolatedPositionId": "7", "type": 1},
+                {"autoAppendMargin": True, "positionId": "7"},
+            ],
+        )
+        self.assertIn("symbol=BTCUSDT", write_calls[3]["url"])
+        self.assertIn("orderId=1", write_calls[5]["url"])
 
     def test_batch_partial_result_is_explicit_but_malformed_or_empty_create_fails_closed(self):
         from weex_mcp.adapters.rest_errors import WeexRestBusinessError

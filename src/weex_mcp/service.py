@@ -151,7 +151,14 @@ class McpService:
         if method == "notifications/initialized":
             return self._jsonrpc_result(request_id, {}, protocol_version=active_protocol_version)
         if method == "tools/list":
-            result: dict[str, Any] = {"tools": self.registry.list_tools()}
+            tools = self.registry.list_tools()
+            if not self.settings.trade_enabled:
+                tools = [
+                    tool
+                    for tool in tools
+                    if tool["_meta"]["com.weex/mcp"]["module"] != "trade"
+                ]
+            result: dict[str, Any] = {"tools": tools}
             if not is_legacy:
                 result.update({"cacheScope": "public", "ttlMs": 300_000})
             return self._jsonrpc_result(

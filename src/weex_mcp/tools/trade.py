@@ -325,7 +325,7 @@ def _preview_trade_action(
         return error_response(exc.code, exc.message, audit=context.audit_dict())
     return ok_response(
         request_id=context.request_id,
-        approval_token=token,
+        preview_id=token,
         expires_at=claims["expires_at"],
         summary=execution.summary,
         risk=execution.risk,
@@ -333,7 +333,7 @@ def _preview_trade_action(
             "reply_text": CONFIRMATION_REPLY_TEXT,
             "reply_instruction": (
                 "To accept the stated risks and continue, resubmit the complete original parameters, "
-                "the approval_token, and the required confirmation object."
+                "the preview_id, and the required confirmation object."
             ),
         },
         audit=context.audit_dict() | credential.safe_audit_dict(),
@@ -354,11 +354,19 @@ def _confirm_trade_action(
 ) -> dict[str, Any]:
     if not trade_enabled:
         return error_response("module_disabled", "Trade module is disabled.", audit=context.audit_dict())
+    preview_id = arguments.get("preview_id")
+    legacy_approval_token = arguments.get("approval_token")
+    if bool(preview_id) == bool(legacy_approval_token):
+        return error_response(
+            "invalid_arguments",
+            "Trade confirmation requires exactly one of preview_id or approval_token.",
+            audit=context.audit_dict(),
+        )
     confirmation_error = _validate_confirmation(arguments.get("confirmation"))
     if confirmation_error is not None:
         return error_response("invalid_arguments", confirmation_error, audit=context.audit_dict())
     try:
-        claims = approval_codec.verify(arguments.get("approval_token"))
+        claims = approval_codec.verify(preview_id or legacy_approval_token)
     except ApprovalTokenError as exc:
         return error_response(exc.code, exc.message, audit=context.audit_dict())
 

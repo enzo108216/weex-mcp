@@ -210,7 +210,7 @@ class AccountAdapterTests(unittest.TestCase):
         self.assertEqual(captured["query"], {})
         self.assertEqual(result["positions"], [{"symbol": "BTCUSDT", "size": "1"}])
 
-    def test_demo_order_history_sends_current_catalog_symbol_and_filters_display_symbol_locally(self):
+    def test_demo_order_history_sends_simulated_symbol_and_filters_display_symbol_locally(self):
         from weex_mcp.adapters.account import WeexAccountRestAdapter
         from weex_mcp.tenant_context import TenantContext
 
@@ -235,7 +235,7 @@ class AccountAdapterTests(unittest.TestCase):
             context=TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a"),
         )
 
-        self.assertEqual(captured["query"], {"symbol": "BTCUSDT", "limit": "20", "page": "0"})
+        self.assertEqual(captured["query"], {"symbol": "BTCSUSDT", "limit": "20", "page": "0"})
         self.assertEqual(result["orders"], [{"symbol": "BTCUSDT", "orderId": "1", "status": "FILLED"}])
 
     def test_spot_single_order_uses_orig_client_order_id_only(self):

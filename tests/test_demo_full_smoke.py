@@ -84,7 +84,7 @@ class DemoFullSmokeSafetyTests(unittest.TestCase):
                 params = request["params"]
                 self.calls.append((params["name"], dict(params["arguments"])))
                 if params["name"] == "trade_preview_order":
-                    return {"result": {"ok": True, "approval_token": "signed-approval"}}
+                    return {"result": {"ok": True, "preview_id": "signed-preview"}}
                 return {"result": {"ok": True, "result": {"success": True}}}
 
         service = FakeService()
@@ -109,12 +109,12 @@ class DemoFullSmokeSafetyTests(unittest.TestCase):
 
         preview_arguments = service.calls[0][1]
         confirm_arguments = service.calls[1][1]
-        self.assertEqual(confirm_arguments["approval_token"], "signed-approval")
+        self.assertEqual(confirm_arguments["preview_id"], "signed-preview")
         self.assertEqual(confirm_arguments["client_order_id"], preview_arguments["client_order_id"])
         self.assertEqual([name for name, _ in service.calls], ["trade_preview_order", "trade_confirm_order"])
         for field in ("market", "trading_mode", "symbol", "side", "position_side", "order_type", "quantity", "credential"):
             self.assertEqual(confirm_arguments[field], preview_arguments[field])
-        self.assertNotIn("preview_id", confirmation)
+        self.assertNotIn("approval_token", confirmation)
         self.assertNotIn("idempotency_key", confirmation)
         script_source = SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertNotIn("trade_confirm_order idempotent retry", script_source)

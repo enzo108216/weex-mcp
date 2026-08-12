@@ -35,15 +35,42 @@ class ToolSchemaTests(unittest.TestCase):
                 "quantity",
                 "client_order_id",
                 "credential",
-                "approval_token",
                 "confirmation",
             ],
         )
         self.assertFalse(confirm_schema["additionalProperties"])
-        self.assertNotIn("preview_id", confirm_schema["properties"])
         self.assertNotIn("idempotency_key", confirm_schema["properties"])
+        self.assertIn("preview_id", confirm_schema["properties"])
         self.assertIn("approval_token", confirm_schema["properties"])
         self.assertEqual(confirm_schema["properties"]["confirmation"]["required"], ["accepted", "reply_text"])
+
+        from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
+
+        base = {
+            "market": "spot",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "0.001",
+            "client_order_id": "schema-preview-id",
+            "credential": {
+                "type": "plaintext",
+                "api_key": "AK",
+                "api_secret": "SK",
+                "api_passphrase": "PP",
+            },
+            "confirmation": {"accepted": True, "reply_text": "确认"},
+        }
+        validate_tool_arguments(base | {"preview_id": "signed"}, confirm_schema)
+        validate_tool_arguments(base | {"approval_token": "legacy-signed"}, confirm_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments(base, confirm_schema)
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments(
+                base | {"preview_id": "signed", "approval_token": "legacy-signed"},
+                confirm_schema,
+            )
 
     def test_tools_call_rejects_unknown_top_level_arguments_before_adapter(self):
         from weex_mcp.service import build_default_service
@@ -539,7 +566,7 @@ class ToolSchemaTests(unittest.TestCase):
 
         confirm_schema = tools["trade_confirm_order"]["inputSchema"]
         valid_confirm = valid_spot_market | {
-            "approval_token": "signed-token",
+            "preview_id": "signed-token",
             "confirmation": {"accepted": True, "reply_text": "确认"},
         }
         validate_tool_arguments(valid_confirm, confirm_schema)

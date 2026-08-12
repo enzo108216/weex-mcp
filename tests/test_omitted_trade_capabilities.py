@@ -120,7 +120,7 @@ class GenericMutationAdapter:
         request = {
             key: value
             for key, value in arguments.items()
-            if key not in {"credential", "approval_token", "confirmation"}
+            if key not in {"credential", "preview_id", "approval_token", "confirmation"}
         }
         binding_name = "request_query" if action in {"cancel_scope", "conditional_cancel"} else "request_body"
         return {
@@ -161,15 +161,15 @@ class OmittedTradeCapabilityTests(unittest.TestCase):
             with self.subTest(action=action):
                 preview = self._call(service, f"trade_preview_{action}", arguments)
                 self.assertTrue(preview["ok"], preview)
-                self.assertIn("approval_token", preview)
-                self.assertNotIn("preview_id", preview)
+                self.assertIn("preview_id", preview)
+                self.assertNotIn("approval_token", preview)
 
                 confirmed = self._call(
                     service,
                     f"trade_confirm_{action}",
                     arguments
                     | {
-                        "approval_token": preview["approval_token"],
+                        "preview_id": preview["preview_id"],
                         "confirmation": confirmation(),
                     },
                 )
@@ -192,7 +192,7 @@ class OmittedTradeCapabilityTests(unittest.TestCase):
             arguments
             | {
                 "amount": "2",
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": confirmation(),
             },
         )
@@ -201,20 +201,20 @@ class OmittedTradeCapabilityTests(unittest.TestCase):
 
         changed_credential = copy.deepcopy(arguments)
         changed_credential["credential"] = credential("AK_OTHER")
-        changed_credential.update({"approval_token": preview["approval_token"], "confirmation": confirmation()})
+        changed_credential.update({"preview_id": preview["preview_id"], "confirmation": confirmation()})
         changed = self._call(service, "trade_confirm_position_margin", changed_credential)
         self.assertFalse(changed["ok"])
         self.assertEqual(changed["error"]["code"], "approval_mismatch")
         self.assertEqual(adapter.confirm_actions, [])
 
-    def test_approval_token_from_one_new_action_cannot_confirm_another(self):
+    def test_preview_id_from_one_new_action_cannot_confirm_another(self):
         from weex_mcp.service import build_default_service
 
         adapter = GenericMutationAdapter()
         service = build_default_service(trade_enabled=True, trade_adapter=adapter)
         preview = self._call(service, "trade_preview_conditional_cancel", cases()["conditional_cancel"])
         target = cases()["auto_append_margin"] | {
-            "approval_token": preview["approval_token"],
+            "preview_id": preview["preview_id"],
             "confirmation": confirmation(),
         }
 

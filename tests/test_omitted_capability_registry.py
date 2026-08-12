@@ -231,7 +231,7 @@ class OmittedCapabilityRegistryTests(unittest.TestCase):
             with self.subTest(suffix=suffix, phase="preview"):
                 validate_tool_arguments(arguments, self._tools()[f"trade_preview_{suffix}"]["inputSchema"])
             confirm_arguments = copy.deepcopy(arguments)
-            confirm_arguments.update({"approval_token": "signed", "confirmation": confirmation()})
+            confirm_arguments.update({"preview_id": "signed", "confirmation": confirmation()})
             with self.subTest(suffix=suffix, phase="confirm"):
                 validate_tool_arguments(confirm_arguments, self._tools()[f"trade_confirm_{suffix}"]["inputSchema"])
 

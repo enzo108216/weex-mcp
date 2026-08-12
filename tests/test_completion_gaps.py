@@ -282,7 +282,7 @@ class CompletionGapTests(unittest.TestCase):
                         "order_type": "MARKET",
                         "quantity": "1",
                         "client_order_id": "reject-order-1",
-                        "approval_token": preview["result"]["approval_token"],
+                        "preview_id": preview["result"]["preview_id"],
                         "confirmation": {"accepted": True, "reply_text": "确认"},
                         "credential": self._trade_credential(),
                     },

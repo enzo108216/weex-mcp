@@ -67,8 +67,8 @@ class McpServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(response["result"]["ok"])
-        self.assertIn("approval_token", response["result"])
-        self.assertNotIn("preview_id", response["result"])
+        self.assertIn("preview_id", response["result"])
+        self.assertNotIn("approval_token", response["result"])
         self.assertEqual(len(private_calls), 1)
         self.assertEqual(private_calls[0]["method"], "GET")
         self.assertEqual(private_calls[0]["url"], "https://api-spot.weex.com/api/v3/account")
@@ -117,7 +117,7 @@ class McpServiceTests(unittest.TestCase):
         self.assertNotIn("PP_INLINE", serialized)
         self.assertNotIn("SK_INLINE", json.dumps(sink.events, sort_keys=True))
 
-    def test_tools_list_is_stable_without_user_credentials(self):
+    def test_tools_list_hides_trade_tools_when_module_is_disabled(self):
         from weex_mcp.service import build_default_service
         from weex_mcp.tenant_context import TenantContext
 
@@ -128,10 +128,21 @@ class McpServiceTests(unittest.TestCase):
         )
 
         names = {tool["name"] for tool in response["result"]["tools"]}
+        self.assertEqual(len(names), 21)
         self.assertIn("market_get_symbol_price", names)
         self.assertIn("account_get_balance", names)
-        self.assertIn("trade_preview_order", names)
-        self.assertIn("trade_confirm_order", names)
+        self.assertFalse(any(name.startswith("trade_") for name in names))
+
+    def test_tools_list_includes_trade_tools_when_module_is_enabled(self):
+        from weex_mcp.service import build_default_service
+
+        response = build_default_service(trade_enabled=True).handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        )
+
+        names = {tool["name"] for tool in response["result"]["tools"]}
+        self.assertEqual(len(names), 47)
+        self.assertEqual(sum(name.startswith("trade_") for name in names), 26)
 
     def test_market_tool_can_run_without_credential(self):
         from weex_mcp.service import build_default_service

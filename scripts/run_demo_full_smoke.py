@@ -272,7 +272,7 @@ def _submit_demo_market_order(
         tool="trade_preview_order",
     )
     confirmation = order_arguments | {
-        "approval_token": preview["approval_token"],
+        "preview_id": preview["preview_id"],
         "confirmation": {"accepted": True, "reply_text": "确认"},
     }
     confirmed = _expect_ok(

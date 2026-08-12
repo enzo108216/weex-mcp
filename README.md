@@ -32,12 +32,15 @@ are provided for the standalone ASGI server and development verification.
 - Standalone Streamable HTTP deployment through Uvicorn.
 - Strict JSON Schema validation for tool arguments and structured responses.
 - Request-scoped credential handling without credential persistence.
-- Stateless, signed approval tokens for two-phase trade execution.
+- Stateless, signed preview IDs for two-phase trade execution.
 - Redacted audit metadata for authenticated account and trade operations.
 
 Trade operations are disabled by default and must be enabled explicitly. The
 service does not persist API credentials, approval state, idempotency results,
 or user sessions.
+When Trade is disabled, its 26 tools are omitted from `tools/list`; direct
+calls still fail closed with `module_disabled`. Explicit enablement exposes the
+full 47-tool catalog.
 
 ## Installation
 
@@ -254,10 +257,12 @@ Trade operations use a stateless preview-and-confirm sequence:
    request-scoped key through a signed, read-only WEEX request and requires
    `canTrade=true`. Spot uses `GET /api/v3/account`; futures live and demo use
    `GET /capi/v3/account/accountConfig`.
-2. The response returns a short-lived, HMAC-signed `approval_token`, an
+2. The response returns a short-lived, HMAC-signed `preview_id`, an
    execution summary, and risk information.
 3. A confirmation request resubmits the complete action parameters, the same
-   request-scoped credential, the approval token, and explicit confirmation.
+   request-scoped credential, the preview ID, and explicit confirmation. During
+   client migration, confirm tools also accept the deprecated `approval_token`
+   alias when `preview_id` is not present.
 4. The service first validates the token signature and expiry, then resolves
    the credential again, repeats all pre-execution validation (including the
    read-only `canTrade` probe), compares the token binding, and only then
@@ -265,14 +270,14 @@ Trade operations use a stateless preview-and-confirm sequence:
 
 The optional `credential.permissions` request field can only narrow a call; it
 does not prove what WEEX granted to the API key. A failed authentication,
-`canTrade=false`, or malformed permission response never produces an approval
-token. Preview itself sends no private write request.
+`canTrade=false`, or malformed permission response never produces a preview
+ID. Preview itself sends no private write request.
 
 For compatibility with the current tool schema, `confirmation.reply_text`
 uses the exact protocol value `确认`. This value is part of the request contract
 and is not a free-form user message.
 
-Approval tokens can be replayed until expiry. Order operations therefore
+Preview IDs can be replayed until expiry. Order operations therefore
 require a stable `client_order_id` for exchange-side correlation and recovery.
 The package does not claim exactly-once execution semantics.
 
@@ -338,7 +343,7 @@ local logs are ignored. Do not commit real service secrets or WEEX credentials.
 - A modern HTTP request reports `header_mismatch`: send the negotiated
   `MCP-Protocol-Version` and required modern request metadata, or perform a
   supported legacy `initialize` first.
-- An approval token becomes invalid after restart or rotation: local instances
+- A preview ID becomes invalid after restart or rotation: local instances
   without an explicit approval secret generate a per-process secret; cloud
   replicas must share one configured secret. Rotation invalidates old tokens.
 - A Trade result is unknown after a timeout: do not blindly retry. Reconcile by

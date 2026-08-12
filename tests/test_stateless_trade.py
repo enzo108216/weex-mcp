@@ -134,15 +134,15 @@ class StatelessTradeTests(unittest.TestCase):
         arguments = self._order()
         preview = self._call(service, "trade_preview_order", arguments)
         self.assertTrue(preview["ok"])
-        self.assertIn("approval_token", preview)
-        self.assertNotIn("preview_id", preview)
+        self.assertIn("preview_id", preview)
+        self.assertNotIn("approval_token", preview)
 
         confirmed = self._call(
             service,
             "trade_confirm_order",
             arguments
             | {
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -150,6 +150,51 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertTrue(confirmed["ok"])
         self.assertEqual(adapter.preview_calls, 2)
         self.assertEqual(adapter.execute_calls, 1)
+
+    def test_confirm_temporarily_accepts_legacy_approval_token_alias(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        arguments = self._order()
+        preview = self._call(service, "trade_preview_order", arguments)
+
+        confirmed = self._call(
+            service,
+            "trade_confirm_order",
+            arguments
+            | {
+                "approval_token": preview["preview_id"],
+                "confirmation": {"accepted": True, "reply_text": "确认"},
+            },
+        )
+
+        self.assertTrue(confirmed["ok"])
+        self.assertEqual(adapter.execute_calls, 1)
+
+    def test_confirm_rejects_both_confirmation_credential_aliases(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        arguments = self._order()
+        preview = self._call(service, "trade_preview_order", arguments)
+
+        confirmed = self._call(
+            service,
+            "trade_confirm_order",
+            arguments
+            | {
+                "preview_id": preview["preview_id"],
+                "approval_token": preview["preview_id"],
+                "confirmation": {"accepted": True, "reply_text": "确认"},
+            },
+        )
+
+        self.assertFalse(confirmed["ok"])
+        self.assertEqual(confirmed["error"]["code"], "invalid_arguments")
+        self.assertEqual(adapter.preview_calls, 1)
+        self.assertEqual(adapter.execute_calls, 0)
 
     def test_parameter_or_credential_change_rejects_before_execution(self):
         from weex_mcp.service import build_default_service
@@ -165,7 +210,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "quantity": "2",
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -179,7 +224,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "credential": self._credential("AK_TWO"),
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -204,7 +249,7 @@ class StatelessTradeTests(unittest.TestCase):
             "trade_confirm_order",
             arguments
             | {
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -223,7 +268,7 @@ class StatelessTradeTests(unittest.TestCase):
             "trade_confirm_order",
             arguments
             | {
-                "approval_token": preview["approval_token"],
+                "preview_id": preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -279,7 +324,7 @@ class StatelessTradeTests(unittest.TestCase):
                     confirm_name,
                     arguments
                     | {
-                        "approval_token": preview["approval_token"],
+                        "preview_id": preview["preview_id"],
                         "confirmation": {"accepted": True, "reply_text": "确认"},
                     },
                 )
@@ -302,19 +347,19 @@ class StatelessTradeTests(unittest.TestCase):
             "trade_confirm_order",
             order
             | {
-                "approval_token": cancel_preview["approval_token"],
+                "preview_id": cancel_preview["preview_id"],
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
         self.assertEqual(wrong_action["error"]["code"], "approval_mismatch")
 
-        token = order_preview["approval_token"]
+        token = order_preview["preview_id"]
         tampered = self._call(
             service,
             "trade_confirm_order",
             order
             | {
-                "approval_token": token[:-1] + ("A" if token[-1] != "A" else "B"),
+                "preview_id": token[:-1] + ("A" if token[-1] != "A" else "B"),
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -325,7 +370,7 @@ class StatelessTradeTests(unittest.TestCase):
             "trade_confirm_order",
             order
             | {
-                "approval_token": token,
+                "preview_id": token,
                 "confirmation": {"accepted": False, "reply_text": "确认"},
             },
         )
@@ -340,7 +385,7 @@ class StatelessTradeTests(unittest.TestCase):
         arguments = self._order()
         preview = self._call(service, "trade_preview_order", arguments)
         confirmation = arguments | {
-            "approval_token": preview["approval_token"],
+            "preview_id": preview["preview_id"],
             "confirmation": {"accepted": True, "reply_text": "确认"},
         }
 
@@ -360,7 +405,7 @@ class StatelessTradeTests(unittest.TestCase):
         service = build_default_service(trade_enabled=True, trade_adapter=adapter)
         arguments = self._order()
         preview = self._call(service, "trade_preview_order", arguments)
-        claims = service.approval_codec.verify(preview["approval_token"])
+        claims = service.approval_codec.verify(preview["preview_id"])
         encoded_claims = json.dumps(claims, ensure_ascii=False)
         for secret in ("AK_ONE", "SK_INLINE", "PP_INLINE"):
             self.assertNotIn(secret, encoded_claims)
@@ -370,7 +415,7 @@ class StatelessTradeTests(unittest.TestCase):
             "trade_confirm_order",
             arguments
             | {
-                "approval_token": "not-a-token",
+                "preview_id": "not-a-token",
                 "confirmation": {"accepted": True, "reply_text": "确认"},
             },
         )
@@ -399,6 +444,7 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "approval_token_issue_failed")
         self.assertNotIn("approval_token", result)
+        self.assertNotIn("preview_id", result)
 
 
 if __name__ == "__main__":
