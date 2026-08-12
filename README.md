@@ -277,6 +277,15 @@ Approval tokens can be replayed until expiry. Order operations therefore
 require a stable `client_order_id` for exchange-side correlation and recovery.
 The package does not claim exactly-once execution semantics.
 
+MCP tool arguments use stable snake_case names for callers, while the REST
+adapters translate them to WEEX's official request fields before signing. For
+example, `client_order_id` maps to `newClientOrderId`, `position_side` maps to
+`positionSide`, `client_algo_id` maps to `clientAlgoId`, and
+`trigger_price_type` maps to `triggerPriceType`. Safety fields such as
+`scope`, `acknowledge_all_symbols`, `acknowledge_all_positions`, and
+`acknowledge_full_position` are MCP-only guard fields; they are never forwarded
+to WEEX.
+
 ## Project layout
 
 ```text
