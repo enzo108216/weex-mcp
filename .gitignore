@@ -24,3 +24,14 @@ env/
 secrets/
 *.secret
 demo-smoke-*.json
+
+# Local planning and delivery artifacts
+MANIFEST.md
+KNOWN_ISSUES.md
+known_issues.md
+memory/
+plans/
+uv.lock
+发版事项/
+需求分析/
+需求资源/
