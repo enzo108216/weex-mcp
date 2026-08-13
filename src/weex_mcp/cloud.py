@@ -25,7 +25,7 @@ def create_cloud_app() -> Any:
     return build_cloud_app()
 
 
-def run_cloud_server(*, host: str = "0.0.0.0", port: int = 8080, workers: int = 1) -> None:
+def run_cloud_server(*, host: str = "127.0.0.1", port: int = 8080, workers: int = 1) -> None:
     """Validate cloud config and start Uvicorn via its import-string factory."""
 
     if not host:

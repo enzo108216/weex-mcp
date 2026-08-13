@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,6 +24,32 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("dynamic", project)
         self.assertIn("version", project["dynamic"])
         self.assertNotIn("version", project)
+        self.assertIn("Development Status :: 4 - Beta", project.get("classifiers", []))
+        self.assertIn("mcp", project.get("keywords", []))
+        for url_name in ("Homepage", "Repository", "Issues", "Documentation"):
+            self.assertIn(url_name, project["urls"])
+            self.assertIn("github.com/enzo108216/weex-mcp", project["urls"][url_name])
+
+    def test_mcp_registry_manifest_matches_package_and_readme_marker(self):
+        from weex_mcp import __version__
+
+        metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        registry = json.loads((ROOT / "server.json").read_text())
+        readme = (ROOT / "README.md").read_text()
+
+        self.assertEqual(registry["name"], "io.github.enzo108216/weex-mcp")
+        self.assertIn(f'<!-- mcp-name: {registry["name"]} -->', readme)
+        self.assertEqual(registry["version"], __version__)
+        self.assertEqual(registry["packages"][0]["registryType"], "pypi")
+        self.assertEqual(registry["packages"][0]["identifier"], metadata["name"])
+        self.assertEqual(registry["packages"][0]["version"], registry["version"])
+        self.assertEqual(registry["packages"][0]["runtimeHint"], "uvx")
+        self.assertEqual(
+            registry["packages"][0]["packageArguments"],
+            [{"type": "positional", "value": "stdio"}],
+        )
+        self.assertEqual(registry["packages"][0]["transport"]["type"], "stdio")
+        self.assertEqual(registry["repository"]["url"], metadata["urls"]["Repository"])
 
     def test_library_delivery_files_and_embed_boundary_are_documented(self):
         self.assertTrue((ROOT / "README.md").is_file())
@@ -49,6 +76,16 @@ class PackageContractTests(unittest.TestCase):
         ):
             with self.subTest(required_text=required_text):
                 self.assertIn(required_text, readme)
+
+        self.assertIn("python -m pip install weex-mcp", readme)
+        self.assertIn("python -m pip install 'weex-mcp[server]'", readme)
+        self.assertIn("python -m pip install -e '.[dev,server]'", readme)
+        for repository_file in ("DEPLOYMENT.md", "KNOWN_ISSUES.md", "LICENSE"):
+            with self.subTest(repository_file=repository_file):
+                self.assertIn(
+                    f"https://github.com/enzo108216/weex-mcp/blob/main/{repository_file}",
+                    readme,
+                )
 
     def test_external_staging_defect_has_a_complete_handoff_record(self):
         defect_record = ROOT / "KNOWN_ISSUES.md"
@@ -82,6 +119,10 @@ class PackageContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         self.assertIn(".[dev,server]", workflow)
         self.assertIn("weex-mcp serve --help", workflow)
+        self.assertIn('python-version: ["3.11", "3.12", "3.13"]', workflow)
+        self.assertIn("python -m build --sdist --wheel", workflow)
+        self.assertIn("twine check dist/*", workflow)
+        self.assertIn("docker build", workflow)
 
     def test_ci_lints_the_demo_smoke_script(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
@@ -95,6 +136,7 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("WEEX_MCP_PORT", compose)
         self.assertIn("/readyz", compose)
         self.assertIn("unless-stopped", compose)
+        self.assertIn("${WEEX_MCP_BIND_HOST:-127.0.0.1}", compose)
 
         example_values = dict(
             line.split("=", 1)
@@ -103,8 +145,64 @@ class PackageContractTests(unittest.TestCase):
         )
         self.assertEqual(example_values["WEEX_APPROVAL_TOKEN_SECRET"], "")
         self.assertEqual(example_values["WEEX_SERVICE_AUTH_TOKEN"], "")
+        self.assertEqual(example_values.get("WEEX_MCP_BIND_HOST"), "127.0.0.1")
         self.assertEqual(example_values.get("WEEX_SPOT_BASE_URL"), "https://api-spot.weex.com")
         self.assertEqual(example_values.get("WEEX_FUTURES_BASE_URL"), "https://api-contract.weex.com")
+
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("WEEX_MCP_BIND_HOST=0.0.0.0 ./scripts/docker-start.sh", readme)
+        self.assertIn("WEEX_MCP_BIND_HOST=192.168.1.20 ./scripts/docker-start.sh", readme)
+
+    def test_compose_forwards_shell_runtime_settings_over_env_file(self):
+        if shutil.which("docker") is None:
+            self.skipTest("Docker Compose is not installed")
+
+        shell_settings = {
+            "WEEX_APPROVAL_TOKEN_TTL_SECONDS": "321",
+            "WEEX_ALLOWED_ORIGINS": "https://client.example.com",
+            "WEEX_MAX_REQUEST_BYTES": "2097152",
+            "WEEX_MARKET_TIMEOUT_SECONDS": "7.5",
+            "WEEX_MARKET_MAX_ATTEMPTS": "4",
+            "WEEX_MARKET_RETRY_BASE_DELAY_SECONDS": "0.25",
+            "WEEX_ACCOUNT_TIMEOUT_SECONDS": "9.5",
+            "WEEX_SPOT_BASE_URL": "https://stg-spot.example.com",
+            "WEEX_FUTURES_BASE_URL": "https://stg-futures.example.com",
+            "WEEX_SERVER_NAME": "weex-mcp-staging",
+        }
+        with tempfile.TemporaryDirectory(prefix="weex-mcp-compose-test-") as temp_dir:
+            env_file = pathlib.Path(temp_dir) / "compose.env"
+            env_file.write_text(
+                "WEEX_APPROVAL_TOKEN_SECRET=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+                "WEEX_SERVICE_AUTH_TOKEN=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n"
+                "WEEX_SPOT_BASE_URL=https://api-spot.weex.com\n"
+                "WEEX_FUTURES_BASE_URL=https://api-contract.weex.com\n"
+            )
+            environment = os.environ.copy()
+            environment.update(shell_settings | {"WEEX_MCP_ENV_FILE": str(env_file)})
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-directory",
+                    str(ROOT),
+                    "--env-file",
+                    str(env_file),
+                    "config",
+                    "--format",
+                    "json",
+                ],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        container_environment = json.loads(completed.stdout)["services"]["mcp"]["environment"]
+        for name, value in shell_settings.items():
+            with self.subTest(name=name):
+                self.assertEqual(container_environment.get(name), value)
 
     def test_docker_start_generates_local_env_once_and_waits_for_readiness(self):
         script = ROOT / "scripts" / "docker-start.sh"
@@ -131,6 +229,7 @@ class PackageContractTests(unittest.TestCase):
                     "WEEX_MCP_ENV_FILE": str(env_file),
                     "WEEX_MCP_PORT": "19080",
                     "WEEX_MCP_HOST_PORT": "19081",
+                    "WEEX_MCP_BIND_HOST": "0.0.0.0",
                 }
             )
             first = subprocess.run(
@@ -144,28 +243,55 @@ class PackageContractTests(unittest.TestCase):
                 if line and not line.startswith("#") and "=" in line
             )
             self.assertGreaterEqual(len(values["WEEX_APPROVAL_TOKEN_SECRET"]), 32)
-            self.assertGreaterEqual(len(values["WEEX_SERVICE_AUTH_TOKEN"]), 16)
+            self.assertGreaterEqual(len(values["WEEX_SERVICE_AUTH_TOKEN"]), 32)
             self.assertNotEqual(values["WEEX_APPROVAL_TOKEN_SECRET"], values["WEEX_SERVICE_AUTH_TOKEN"])
             self.assertEqual(values["WEEX_TRADE_ENABLED"], "false")
             self.assertEqual(values["WEEX_MCP_PORT"], "19080")
             self.assertEqual(values["WEEX_MCP_HOST_PORT"], "19081")
+            self.assertEqual(values["WEEX_MCP_BIND_HOST"], "0.0.0.0")
             self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
             self.assertIn("compose", log_path.read_text())
             self.assertIn("--wait", log_path.read_text())
 
-            env_file.write_text("WEEX_APPROVAL_TOKEN_SECRET=keep-me\nWEEX_SERVICE_AUTH_TOKEN=keep-me-too\n")
+            env_file.write_text(
+                "WEEX_APPROVAL_TOKEN_SECRET=keep-me\n"
+                "WEEX_SERVICE_AUTH_TOKEN=keep-me-too\n"
+                "WEEX_MCP_HOST_PORT=18081\n"
+            )
             env_file.chmod(0o600)
             second = subprocess.run(
                 [str(script)], cwd=ROOT, env=environment, text=True, capture_output=True, check=False
             )
             self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(env_file.read_text(), "WEEX_APPROVAL_TOKEN_SECRET=keep-me\nWEEX_SERVICE_AUTH_TOKEN=keep-me-too\n")
+            self.assertEqual(
+                env_file.read_text(),
+                "WEEX_APPROVAL_TOKEN_SECRET=keep-me\n"
+                "WEEX_SERVICE_AUTH_TOKEN=keep-me-too\n"
+                "WEEX_MCP_HOST_PORT=18081\n",
+            )
+            self.assertIn("WEEX MCP is published on 0.0.0.0:19081.", second.stdout)
+
+            default_env_file = temp / "default.env"
+            default_environment = environment | {"WEEX_MCP_ENV_FILE": str(default_env_file)}
+            default_environment.pop("WEEX_MCP_BIND_HOST")
+            default_run = subprocess.run(
+                [str(script)], cwd=ROOT, env=default_environment, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(default_run.returncode, 0, default_run.stderr)
+            self.assertIn("WEEX_MCP_BIND_HOST=127.0.0.1", default_env_file.read_text())
 
     def test_runtime_and_package_versions_share_one_source(self):
         from weex_mcp import __version__
         from weex_mcp.settings import Settings
 
         self.assertEqual(Settings().server_version, __version__)
+
+    def test_deployment_rollback_uses_preview_id_as_the_primary_contract(self):
+        deployment = (ROOT / "DEPLOYMENT.md").read_text()
+
+        self.assertIn("`preview_id`", deployment)
+        self.assertIn("deprecated compatibility alias", deployment)
+        self.assertNotIn("complete parameters plus `approval_token`", deployment)
 
     def test_stdio_cli_negotiates_legacy_protocol_and_lists_tools(self):
         requests = "\n".join(

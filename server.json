@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.enzo108216/weex-mcp",
+  "title": "WEEX MCP",
+  "description": "MCP tools for WEEX market data, account queries, and guarded trade operations.",
+  "version": "0.1.0",
+  "repository": {
+    "source": "github",
+    "url": "https://github.com/enzo108216/weex-mcp"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "weex-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "stdio"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

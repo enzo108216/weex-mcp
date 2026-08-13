@@ -5,8 +5,24 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 ENV_FILE=${WEEX_MCP_ENV_FILE:-"$PROJECT_ROOT/.env"}
 START_TIMEOUT=${WEEX_MCP_START_TIMEOUT_SECONDS:-120}
-MCP_PORT=${WEEX_MCP_PORT:-8080}
-HOST_PORT=${WEEX_MCP_HOST_PORT:-8080}
+MCP_PORT=${WEEX_MCP_PORT:-}
+HOST_PORT=${WEEX_MCP_HOST_PORT:-}
+BIND_HOST=${WEEX_MCP_BIND_HOST:-}
+
+if [ -e "$ENV_FILE" ]; then
+    if [ -z "$MCP_PORT" ]; then
+        MCP_PORT=$(awk -F= '$1 == "WEEX_MCP_PORT" {print $2; exit}' "$ENV_FILE")
+    fi
+    if [ -z "$HOST_PORT" ]; then
+        HOST_PORT=$(awk -F= '$1 == "WEEX_MCP_HOST_PORT" {print $2; exit}' "$ENV_FILE")
+    fi
+    if [ -z "$BIND_HOST" ]; then
+        BIND_HOST=$(awk -F= '$1 == "WEEX_MCP_BIND_HOST" {print $2; exit}' "$ENV_FILE")
+    fi
+fi
+MCP_PORT=${MCP_PORT:-8080}
+HOST_PORT=${HOST_PORT:-8080}
+BIND_HOST=${BIND_HOST:-127.0.0.1}
 
 generate_secret() {
     if command -v openssl >/dev/null 2>&1; then
@@ -45,6 +61,7 @@ if [ ! -e "$ENV_FILE" ]; then
         printf '%s\n' 'WEEX_TRADE_ENABLED=false'
         printf 'WEEX_MCP_PORT=%s\n' "$MCP_PORT"
         printf 'WEEX_MCP_HOST_PORT=%s\n' "$HOST_PORT"
+        printf 'WEEX_MCP_BIND_HOST=%s\n' "$BIND_HOST"
     } >"$ENV_FILE"
     chmod 600 "$ENV_FILE"
     printf 'Created private Docker configuration: %s\n' "$ENV_FILE"
@@ -57,7 +74,10 @@ WEEX_MCP_ENV_FILE="$ENV_FILE" docker compose \
     --env-file "$ENV_FILE" \
     up --detach --build --wait --wait-timeout "$START_TIMEOUT"
 
-HOST_PORT=$(awk -F= '$1 == "WEEX_MCP_HOST_PORT" {print $2; exit}' "$ENV_FILE")
-HOST_PORT=${HOST_PORT:-8080}
-printf 'WEEX MCP is ready: http://127.0.0.1:%s/readyz\n' "$HOST_PORT"
-printf 'The MCP endpoint is http://127.0.0.1:%s/mcp; its bearer token remains in %s.\n' "$HOST_PORT" "$ENV_FILE"
+ACCESS_HOST=$BIND_HOST
+if [ "$ACCESS_HOST" = "0.0.0.0" ]; then
+    ACCESS_HOST=127.0.0.1
+fi
+printf 'WEEX MCP is published on %s:%s.\n' "$BIND_HOST" "$HOST_PORT"
+printf 'Readiness: http://%s:%s/readyz\n' "$ACCESS_HOST" "$HOST_PORT"
+printf 'MCP endpoint: http://%s:%s/mcp; its bearer token remains in %s.\n' "$ACCESS_HOST" "$HOST_PORT" "$ENV_FILE"

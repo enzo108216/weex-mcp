@@ -17,7 +17,8 @@ request body and used only for that request.
 | Environment variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `WEEX_APPROVAL_TOKEN_SECRET` | Cloud: yes | Local: generated per service instance | At least 32 UTF-8 bytes. Every replica must use the same value so a confirm can verify a token issued by another replica. |
-| `WEEX_SERVICE_AUTH_TOKEN` | Cloud: yes | Local: empty | Bearer token required by `/mcp`; printable ASCII only, without whitespace. Compared in constant time. |
+| `WEEX_SERVICE_AUTH_TOKEN` | Cloud: yes | Local: empty | Bearer token required by `/mcp`; at least 32 printable ASCII characters without whitespace. Compared in constant time. |
+| `WEEX_MCP_BIND_HOST` | No | `127.0.0.1` | Process or Compose host bind address. Use `0.0.0.0` for all IPv4 interfaces or a specific host interface IP for narrower exposure. |
 | `WEEX_MCP_PORT` | No | `8080` | Default `weex-mcp serve` and container health-check port; an explicit `--port` wins for the process. |
 | `WEEX_TRADE_ENABLED` | No | `false` | Strict `true`/`false`. Keep false until Trade write access is intentionally enabled. |
 | `WEEX_APPROVAL_TOKEN_TTL_SECONDS` | No | `120` | Positive approval-token lifetime in seconds. |
@@ -39,12 +40,12 @@ environment dumps or third-party instrumentation.
 ## Run as a process
 
 ```bash
-python -m pip install '.[server]'
+python -m pip install 'weex-mcp[server]'
 export WEEX_APPROVAL_TOKEN_SECRET='replace-with-at-least-32-random-bytes'
-export WEEX_SERVICE_AUTH_TOKEN='replace-with-a-random-service-token'
+export WEEX_SERVICE_AUTH_TOKEN='replace-with-at-least-32-random-ascii-characters'
 export WEEX_TRADE_ENABLED='false'
 export WEEX_MCP_PORT='8080'
-weex-mcp serve --host 0.0.0.0 --workers 1
+weex-mcp serve --workers 1
 ```
 
 `GET /healthz` is a liveness check. `GET /readyz` is a readiness check and is
@@ -52,13 +53,17 @@ available without the service bearer token; neither response contains secrets.
 Cloud configuration is validated before Uvicorn starts, so a missing or invalid
 required value terminates the command with exit code 2.
 
+The process defaults to `127.0.0.1`. Use `--host 0.0.0.0` to listen on all
+IPv4 interfaces, or `--host 192.168.1.20` to bind one host interface. The same
+choice can be supplied through `WEEX_MCP_BIND_HOST`; an explicit CLI flag wins.
+
 ## Run the container
 
 ```bash
 docker build -t weex-mcp:local .
-docker run --rm -p 8080:8080 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -e WEEX_APPROVAL_TOKEN_SECRET='replace-with-at-least-32-random-bytes' \
-  -e WEEX_SERVICE_AUTH_TOKEN='replace-with-a-random-service-token' \
+  -e WEEX_SERVICE_AUTH_TOKEN='replace-with-at-least-32-random-ascii-characters' \
   -e WEEX_TRADE_ENABLED=false \
   weex-mcp:local
 ```
@@ -82,7 +87,22 @@ The first run creates `.env` with mode `0600`, random
 The script runs `docker compose up -d --build --wait`; it does not generate,
 read, or persist WEEX user API keys. Set `WEEX_MCP_PORT` for the container
 listen port and `WEEX_MCP_HOST_PORT` for the host-published port before first
-run. Stop the service with `docker compose down`.
+run. The published port binds to `WEEX_MCP_BIND_HOST=127.0.0.1` by default;
+set it to `0.0.0.0` for all host IPv4 interfaces or to a specific host
+interface IP for narrower exposure. The first-run value is saved in `.env`;
+existing files remain unchanged. Stop the service with `docker compose down`.
+
+For example:
+
+```bash
+WEEX_MCP_BIND_HOST=0.0.0.0 ./scripts/docker-start.sh
+WEEX_MCP_BIND_HOST=192.168.1.20 ./scripts/docker-start.sh
+```
+
+Remote clients use a reachable DNS name or host IP, not `0.0.0.0`, and still
+must provide the configured Bearer token. External exposure requires TLS,
+firewall or network policy, request-body log suppression, monitoring, and
+appropriate gateway traffic controls.
 
 For explicit configuration, copy `.env.example` to `.env` and run:
 
@@ -102,7 +122,7 @@ have been verified.
 
 This Compose helper is a local/development convenience. Production still
 requires platform-managed secrets, TLS termination, request-body log
-suppression, and independent rollout/observation controls.
+suppression, rate limiting, and independent rollout/observation controls.
 
 ## MCP request boundary
 
@@ -164,13 +184,32 @@ rotation. A rolling deployment with mixed signing secrets is not supported.
 If a Trade confirm times out after the exchange may have accepted it, do not
 blindly resubmit with a new client order ID. Query the exchange using the stable
 ID and reconcile the unknown outcome in the hosting system. That compensation,
-along with TLS, gateway policy, monitoring, alerting, and platform rollout, is
-an external deployment responsibility.
+along with TLS, gateway policy, monitoring, alerting, rate limiting, and
+platform rollout, is an external deployment responsibility. This service does
+not provide built-in rate limiting.
+
+## Release checklist
+
+1. Update the single package version in `src/weex_mcp/_version.py`, then keep
+   `server.json` package and server versions identical.
+2. Run the full unit, Ruff, mypy, sdist/wheel, installed-wheel, Registry schema,
+   Compose configuration, and Docker build checks used by CI.
+3. Publish the wheel and sdist to PyPI before submitting the matching
+   `server.json` to the MCP Registry; Registry ownership verification reads the
+   `mcp-name` marker from the published PyPI README.
+4. Deploy the same immutable version to a non-production environment, verify
+   `/readyz`, authenticated MCP requests, and the expected Trade-disabled tool
+   catalog, then promote the exact artifact.
+
+Do not publish a Registry version whose PyPI package is missing, and do not
+reuse a version number for different code. External publication credentials
+belong in the release platform, never in this repository.
 
 ## Rollback
 
-Roll back the image/wheel and its clients as one compatible version. Confirm
-schemas changed from the historical stateful `preview_id` design to complete
-parameters plus `approval_token`; do not mix clients and servers from those two
-contracts. No cache or database cleanup is required because the MCP stores no
-preview, idempotency, credential, or user state.
+Roll back the image/wheel and its clients as one compatible version. The current
+stateless confirmation contract resubmits complete action parameters with a
+signed `preview_id`; `approval_token` is only a deprecated compatibility alias
+accepted during client migration. Do not mix this contract with historical
+stateful preview implementations. No cache or database cleanup is required
+because the MCP stores no preview, idempotency, credential, or user state.

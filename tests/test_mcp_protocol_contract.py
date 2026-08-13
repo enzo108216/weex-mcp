@@ -36,6 +36,7 @@ class McpProtocolContractTests(unittest.TestCase):
         self.assertEqual(discovered["result"]["resultType"], "complete")
 
     def test_modern_server_discover_reports_supported_version_and_tools(self):
+        from weex_mcp import __version__
         from weex_mcp.service import build_default_service
 
         response = build_default_service().handle_jsonrpc(
@@ -48,6 +49,10 @@ class McpProtocolContractTests(unittest.TestCase):
         self.assertEqual(response["result"]["cacheScope"], "public")
         self.assertIsInstance(response["result"]["ttlMs"], int)
         self.assertGreaterEqual(response["result"]["ttlMs"], 0)
+        self.assertEqual(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"],
+            {"name": "weex-mcp", "version": __version__},
+        )
 
     def test_tools_list_declares_required_2026_cache_metadata(self):
         from weex_mcp.service import build_default_service

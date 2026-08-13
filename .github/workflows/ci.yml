@@ -4,25 +4,86 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and development tools
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev,server]'
+      - name: Unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests
+      - name: Compile sources
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src tests scripts
+      - name: Ruff
+        run: ruff check src tests scripts
+      - name: Mypy
+        run: mypy src/weex_mcp
+      - name: Cloud server CLI
+        run: weex-mcp serve --help
+
+  release-artifacts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install package and development tools
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev,server]'
-      - name: Unit tests
-        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests
-      - name: Compile sources
-        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m compileall -q src
-      - name: Ruff
-        run: ruff check src tests scripts
-      - name: Mypy
-        run: mypy src/weex_mcp
-      - name: Build wheel
-        run: python -m build --wheel --no-isolation
-      - name: Cloud server CLI
-        run: weex-mcp serve --help
+      - name: Install release verification tools
+        run: python -m pip install --upgrade pip && python -m pip install '.[dev,server]'
+      - name: Build sdist and wheel
+        run: python -m build --sdist --wheel
+      - name: Check distribution metadata and wheel contents
+        run: twine check dist/* && check-wheel-contents dist/*.whl
+      - name: Test extracted source distribution
+        run: |
+          mkdir /tmp/weex-mcp-sdist
+          tar -xzf dist/*.tar.gz -C /tmp/weex-mcp-sdist
+          cd /tmp/weex-mcp-sdist/weex_mcp-*
+          python -m pip install -e '.[dev,server]'
+          PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests
+      - name: Smoke test installed wheel outside the source tree
+        run: |
+          python -m venv /tmp/weex-mcp-wheel
+          /tmp/weex-mcp-wheel/bin/python -m pip install --upgrade pip uvicorn dist/*.whl
+          cd /tmp
+          /tmp/weex-mcp-wheel/bin/weex-mcp --version
+          /tmp/weex-mcp-wheel/bin/weex-mcp --smoke
+          /tmp/weex-mcp-wheel/bin/weex-mcp serve --help
+      - name: Validate MCP Registry manifest
+        run: |
+          curl --fail --silent --show-error --location \
+            https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json \
+            --output /tmp/mcp-server.schema.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from jsonschema import Draft7Validator, FormatChecker
+
+          schema = json.loads(Path("/tmp/mcp-server.schema.json").read_text())
+          instance = json.loads(Path("server.json").read_text())
+          Draft7Validator(schema, format_checker=FormatChecker()).validate(instance)
+          PY
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: >-
+          WEEX_APPROVAL_TOKEN_SECRET=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          WEEX_SERVICE_AUTH_TOKEN=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+          docker compose config --quiet
+      - name: Build production image
+        run: docker build --tag weex-mcp:ci .

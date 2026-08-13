@@ -421,6 +421,37 @@ class AsgiAppTests(unittest.TestCase):
         self.assertIn("header_mismatch", response_body.decode())
         self.assertEqual(json.loads(response_body)["error"]["code"], -32020)
 
+    def test_asgi_treats_unknown_body_version_as_header_mismatch(self):
+        from weex_mcp.asgi_app import build_asgi_app
+
+        body = {
+            "jsonrpc": "2.0",
+            "id": "unknown-body-version",
+            "method": "tools/list",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                }
+            },
+        }
+        status, response_body, _sent = asyncio.run(
+            call_asgi(
+                build_asgi_app(),
+                body=json.dumps(body).encode(),
+                headers=[
+                    (b"mcp-protocol-version", b"2026-07-28"),
+                    (b"x-tenant-id", b"tenant_a"),
+                    (b"x-user-id", b"user_a"),
+                    (b"x-session-id", b"session_a"),
+                ],
+                modern=False,
+            )
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(response_body)["error"]["code"], -32020)
+
     def test_asgi_returns_standard_unsupported_protocol_version_error(self):
         from weex_mcp.asgi_app import build_asgi_app
 
@@ -530,7 +561,7 @@ class AsgiAppTests(unittest.TestCase):
         from weex_mcp.asgi_app import build_asgi_app
         from weex_mcp.settings import Settings
 
-        app = build_asgi_app(settings=Settings(service_auth_token="token_a"))
+        app = build_asgi_app(settings=Settings(service_auth_token="t" * 32))
         status, body, _sent = asyncio.run(
             call_asgi(
                 app,
@@ -550,13 +581,13 @@ class AsgiAppTests(unittest.TestCase):
         from weex_mcp.asgi_app import build_asgi_app
         from weex_mcp.settings import Settings
 
-        app = build_asgi_app(settings=Settings(service_auth_token="token_a"))
+        app = build_asgi_app(settings=Settings(service_auth_token="t" * 32))
         status, body, _sent = asyncio.run(
             call_asgi(
                 app,
                 body=json.dumps({"jsonrpc": "2.0", "id": "asgi_4", "method": "tools/list", "params": {}}).encode(),
                 headers=[
-                    (b"authorization", b"Bearer token_a"),
+                    (b"authorization", f"Bearer {'t' * 32}".encode()),
                     (b"x-tenant-id", b"tenant_a"),
                     (b"x-user-id", b"user_a"),
                     (b"x-session-id", b"session_a"),
@@ -572,7 +603,7 @@ class AsgiAppTests(unittest.TestCase):
         from weex_mcp.service import build_default_service
         from weex_mcp.settings import Settings
 
-        service = build_default_service(settings=Settings(service_auth_token="service-token"))
+        service = build_default_service(settings=Settings(service_auth_token="t" * 32))
         app = build_asgi_app(service=service)
         status, body, _sent = asyncio.run(
             call_asgi(

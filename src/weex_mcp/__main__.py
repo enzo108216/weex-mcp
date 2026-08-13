@@ -15,7 +15,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--smoke", action="store_true", help="Run a local tools/list smoke request.")
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser("serve", help="Run the cloud ASGI server (requires the server extra).")
-    serve_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0).")
+    serve_parser.add_argument(
+        "--host",
+        default=os.environ.get("WEEX_MCP_BIND_HOST", "127.0.0.1"),
+        help="Bind host (default: WEEX_MCP_BIND_HOST or 127.0.0.1).",
+    )
     serve_parser.add_argument(
         "--port",
         type=int,

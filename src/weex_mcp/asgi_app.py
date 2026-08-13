@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .http_app import handle_mcp_post
+from .protocol import validate_modern_request_metadata
 from .response import error_response, jsonrpc_error, ok_response
 from .service import LEGACY_PROTOCOL_VERSIONS, McpService, build_default_service
 from .settings import Settings
@@ -199,30 +200,14 @@ def _validate_protocol_metadata(body: bytes, header_version: str, headers: dict[
     request_id = request.get("id")
     method = request.get("method")
     params = request.get("params")
-    if not isinstance(params, dict):
-        return jsonrpc_error(
-            request_id,
-            -32602,
-            "protocol_version_missing: Request params must contain modern protocol metadata.",
-        )
-    metadata = params.get("_meta")
-    if not isinstance(metadata, dict):
-        return jsonrpc_error(request_id, -32602, "protocol_version_missing: Request metadata must declare io.modelcontextprotocol/protocolVersion.")
-    body_version = metadata.get("io.modelcontextprotocol/protocolVersion")
-    if body_version != header_version:
-        return jsonrpc_error(
-            request_id,
-            -32020,
-            "header_mismatch: MCP-Protocol-Version header does not match request metadata.",
-            data={"header": header_version},
-        )
-    client_capabilities = metadata.get("io.modelcontextprotocol/clientCapabilities")
-    if not isinstance(client_capabilities, dict):
-        return jsonrpc_error(
-            request_id,
-            -32602,
-            "client_capabilities_missing: Request metadata must declare io.modelcontextprotocol/clientCapabilities.",
-        )
+    metadata_error = validate_modern_request_metadata(
+        request,
+        modern_version=header_version,
+        mismatch_is_header_error=True,
+    )
+    if metadata_error is not None:
+        return metadata_error
+    assert isinstance(params, dict)
     mirrored_method = _decode_mirrored_header(headers.get("mcp-method"), allow_base64=False)
     if mirrored_method is None or not isinstance(method, str) or mirrored_method != method:
         return jsonrpc_error(request_id, -32020, "header_mismatch: Mcp-Method header is missing, invalid, or does not match the request body.")

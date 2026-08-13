@@ -1,0 +1,14 @@
+include README.md
+include LICENSE
+include DEPLOYMENT.md
+include KNOWN_ISSUES.md
+include .gitignore
+include compose.yaml
+include Dockerfile
+include .dockerignore
+include .env.example
+include server.json
+include .github/workflows/ci.yml
+recursive-include src *.py
+recursive-include tests *.py
+recursive-include scripts *.py *.sh

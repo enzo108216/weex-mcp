@@ -4,6 +4,7 @@ import json
 import sys
 from typing import Any, TextIO
 
+from .protocol import validate_modern_request_metadata
 from .response import jsonrpc_error
 from .service import LEGACY_PROTOCOL_VERSIONS, McpService, build_default_service
 from .settings import Settings
@@ -33,11 +34,19 @@ def run_stdio_server(
         except json.JSONDecodeError:
             response = jsonrpc_error(None, -32700, "Parse error.")
         else:
-            response = active_service.handle_jsonrpc(
+            metadata_error = _modern_metadata_error(
                 request,
-                context=context,
                 protocol_version=protocol_version,
+                modern_version=active_service.settings.protocol_version,
             )
+            if metadata_error is not None:
+                response = None if isinstance(request, dict) and "id" not in request else metadata_error
+            else:
+                response = active_service.handle_jsonrpc(
+                    request,
+                    context=context,
+                    protocol_version=protocol_version,
+                )
             negotiated = _negotiated_protocol_version(request, response)
             if negotiated is not None:
                 protocol_version = negotiated
@@ -57,3 +66,21 @@ def _negotiated_protocol_version(
         return None
     version = response["result"].get("protocolVersion")
     return version if version in LEGACY_PROTOCOL_VERSIONS else None
+
+
+def _modern_metadata_error(
+    request: Any,
+    *,
+    protocol_version: str | None,
+    modern_version: str,
+) -> dict[str, Any] | None:
+    if protocol_version in LEGACY_PROTOCOL_VERSIONS or _is_legacy_initialize(request):
+        return None
+    return validate_modern_request_metadata(request, modern_version=modern_version)
+
+
+def _is_legacy_initialize(request: Any) -> bool:
+    if not isinstance(request, dict) or request.get("method") != "initialize":
+        return False
+    params = request.get("params")
+    return isinstance(params, dict) and params.get("protocolVersion") in LEGACY_PROTOCOL_VERSIONS

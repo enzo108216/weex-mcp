@@ -12,9 +12,22 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "WEEX MCP" }]
 dependencies = []
+keywords = ["mcp", "model-context-protocol", "weex", "trading"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
 
 [project.urls]
-Documentation = "https://modelcontextprotocol.io/specification/2026-07-28"
+Homepage = "https://github.com/enzo108216/weex-mcp"
+Repository = "https://github.com/enzo108216/weex-mcp"
+Issues = "https://github.com/enzo108216/weex-mcp/issues"
+Documentation = "https://github.com/enzo108216/weex-mcp#readme"
 
 [project.optional-dependencies]
 server = [
@@ -22,10 +35,12 @@ server = [
 ]
 dev = [
     "build>=1.2",
+    "check-wheel-contents>=0.6",
     "jsonschema>=4.23",
     "ruff>=0.6",
     "mypy>=1.11",
     "setuptools>=77",
+    "twine>=5",
 ]
 
 [project.scripts]

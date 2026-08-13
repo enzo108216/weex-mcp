@@ -1,5 +1,7 @@
 # WEEX MCP
 
+<!-- mcp-name: io.github.enzo108216/weex-mcp -->
+
 WEEX MCP is a Python 3.11+ implementation of Model Context Protocol (MCP)
 tools for WEEX market data, account information, and controlled trade
 execution. The package supports both local integration and a standalone HTTP
@@ -31,7 +33,9 @@ are provided for the standalone ASGI server and development verification.
 - Local stdio transport for MCP client integration.
 - Embeddable service and ASGI application factories for host applications.
 - Standalone Streamable HTTP deployment through Uvicorn.
-- Strict JSON Schema validation for tool arguments and structured responses.
+- Strict JSON Schema validation for tool arguments. Output schemas are
+  published and checked for schema validity, with representative response
+  conformance tests.
 - Request-scoped credential handling without credential persistence.
 - Stateless, signed preview IDs for two-phase trade execution.
 - Redacted audit metadata for authenticated account and trade operations.
@@ -45,23 +49,20 @@ full 47-tool catalog.
 
 ## Installation
 
-Install the core package:
+Install the published core package:
 
 ```bash
-python -m pip install .
+python -m pip install weex-mcp
 ```
 
 Install the standalone server dependencies:
 
 ```bash
-python -m pip install '.[server]'
+python -m pip install 'weex-mcp[server]'
 ```
 
-Install the development verification dependencies:
-
-```bash
-python -m pip install -e '.[dev,server]'
-```
+Source checkout and editable development installation are covered in
+[Development and verification](#development-and-verification).
 
 ## Runtime modes
 
@@ -103,18 +104,24 @@ must share protocol, authentication, or approval-token configuration.
 ### Standalone HTTP service
 
 Cloud mode requires an approval-token signing secret and a service bearer
-token before the listening socket is opened:
+token before the listening socket is opened. The process binds to
+`127.0.0.1` by default:
 
 ```bash
 export WEEX_APPROVAL_TOKEN_SECRET='replace-with-at-least-32-random-bytes'
-export WEEX_SERVICE_AUTH_TOKEN='replace-with-a-random-service-token'
+export WEEX_SERVICE_AUTH_TOKEN='replace-with-at-least-32-random-ascii-characters'
 export WEEX_TRADE_ENABLED='false'
-weex-mcp serve --host 0.0.0.0 --port 8080 --workers 1
+weex-mcp serve --port 8080 --workers 1
 ```
+
+Use `--host 0.0.0.0` or set `WEEX_MCP_BIND_HOST` only when the process must
+accept connections through external interfaces. An explicit `--host` takes
+precedence over the environment value.
 
 `GET /healthz` provides liveness status. `GET /readyz` provides readiness
 status. Complete configuration, container, scaling, rotation, and rollback
-requirements are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
+requirements are documented in
+[DEPLOYMENT.md](https://github.com/enzo108216/weex-mcp/blob/main/DEPLOYMENT.md).
 
 ### One-command Docker startup
 
@@ -136,8 +143,30 @@ docker compose down
 ```
 
 To use a different host/container port, export `WEEX_MCP_HOST_PORT` and
-`WEEX_MCP_PORT` before the first run, or edit the generated `.env`. For manual
-Compose operation, copy `.env.example` to `.env` and run
+`WEEX_MCP_PORT` before the first run, or edit the generated `.env`. The default
+host binding is loopback (`WEEX_MCP_BIND_HOST=127.0.0.1`). To publish on all
+host interfaces, set the bind host on the first run:
+
+```bash
+WEEX_MCP_BIND_HOST=0.0.0.0 ./scripts/docker-start.sh
+```
+
+To expose only one host interface, use that interface's IP instead:
+
+```bash
+WEEX_MCP_BIND_HOST=192.168.1.20 ./scripts/docker-start.sh
+```
+
+The first-run value is saved in the generated `.env`. Because the script never
+overwrites an existing `.env`, edit `WEEX_MCP_BIND_HOST` there for later runs,
+or export a value to override Compose interpolation for a single run.
+`0.0.0.0` publishes on every IPv4 interface; it is a bind address, not a URL
+that remote clients should use. Clients connect to a reachable DNS name or
+host IP and must still send the service Bearer token. Before exposing the
+service beyond localhost, provide TLS, firewall or network policy, request-body
+log suppression, monitoring, and appropriate gateway traffic controls.
+
+For manual Compose operation, copy `.env.example` to `.env` and run
 `docker compose up -d --build --wait` after filling both required service
 secret values; the example intentionally leaves them empty so unchanged
 placeholder credentials cannot start the service.
@@ -199,19 +228,25 @@ credential used by Account and Trade tools. Production URLs must use HTTPS.
 
 ## Protocol compatibility
 
-The HTTP and stdio transports support the following MCP protocol versions:
+The stdio transport supports the current protocol plus legacy `initialize`
+compatibility. HTTP supports the current stateless POST contract and legacy
+POST `initialize` compatibility; it does not implement the session-oriented
+GET behavior of older Streamable HTTP revisions.
 
 | Protocol version | Compatibility mode | Negotiation |
 | --- | --- | --- |
-| `2025-06-18` | Codex-compatible legacy mode | `initialize` request |
-| `2025-11-25` | Claude Code-compatible legacy mode | `initialize` request |
-| `2026-07-28` | Current project contract | Protocol header and request metadata |
+| `2025-06-18` | Codex-compatible legacy initialize | stdio and HTTP POST `initialize` |
+| `2025-11-25` | Claude Code-compatible legacy initialize | stdio and HTTP POST `initialize` |
+| `2026-07-28` | Current project contract | protocol header (HTTP) and request metadata |
 
 Legacy responses use the response shape associated with the negotiated
-protocol. The `2026-07-28` contract additionally validates
-`MCP-Protocol-Version`, request metadata, result type, cache scope, and TTL
-metadata. HTTP protocol selection is evaluated for each request and is not
-stored as user session state.
+protocol. The `2026-07-28` contract validates request metadata, result type,
+cache scope, and TTL metadata. HTTP additionally validates
+`MCP-Protocol-Version`, `Mcp-Method`, and method-specific `Mcp-Name` headers.
+HTTP protocol selection is evaluated for each request and is not stored as
+user session state. `server/discover` belongs to the current contract and
+therefore advertises `2026-07-28`; the two older versions are compatibility
+modes reached through `initialize`, not additional current discovery targets.
 
 ## Tool catalog
 
@@ -320,7 +355,9 @@ The repository defines the following local checks:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m compileall -q src tests scripts
-python -m build --wheel --no-isolation
+python -m build --sdist --wheel
+twine check dist/*
+check-wheel-contents dist/*.whl
 ruff check src tests scripts
 mypy src/weex_mcp
 PYTHONPATH=src python3 -m weex_mcp --smoke
@@ -356,7 +393,9 @@ local logs are ignored. Do not commit real service secrets or WEEX credentials.
 ## Known issues
 
 Confirmed external platform defects and their safe retest conditions are
-tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). These records do not constitute
+tracked in
+[KNOWN_ISSUES.md](https://github.com/enzo108216/weex-mcp/blob/main/KNOWN_ISSUES.md).
+These records do not constitute
 authorization to submit new trade requests.
 
 ## Operational boundary
@@ -365,9 +404,11 @@ The package provides MCP protocol handling, strict configuration validation,
 request-scoped credential resolution, WEEX REST adapters, health endpoints,
 and a container entry point. External infrastructure remains responsible for
 TLS termination, secret distribution, gateway policy, request-body log
-suppression, monitoring, alerting, deployment rollout, and reconciliation of
-unknown trade outcomes.
+suppression, monitoring, alerting, rate limiting, deployment rollout, and
+reconciliation of unknown trade outcomes. The service intentionally does not
+implement built-in rate limiting.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+This project is licensed under the MIT License. See
+[LICENSE](https://github.com/enzo108216/weex-mcp/blob/main/LICENSE).

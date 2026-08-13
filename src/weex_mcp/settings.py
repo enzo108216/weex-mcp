@@ -174,6 +174,8 @@ def _parse_bool(source: Mapping[str, str], name: str, default: bool) -> bool:
 def _validate_service_auth_token(value: str, name: str) -> None:
     if any(ord(character) < 0x21 or ord(character) > 0x7E for character in value):
         raise SettingsError(f"{name} must contain only printable ASCII characters without whitespace.")
+    if len(value) < 32:
+        raise SettingsError(f"{name} must be at least 32 characters.")
 
 
 def _normalize_non_empty_text(value: object, name: str) -> str:

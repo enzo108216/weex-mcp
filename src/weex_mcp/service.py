@@ -125,6 +125,12 @@ class McpService:
                     "instructions": "WEEX local MCP tools for public market data, read-only account queries, and stateless preview/confirm trading.",
                     "cacheScope": "public",
                     "ttlMs": 300_000,
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": {
+                            "name": self.settings.server_name,
+                            "version": self.settings.server_version,
+                        }
+                    },
                 },
                 protocol_version=active_protocol_version,
             )

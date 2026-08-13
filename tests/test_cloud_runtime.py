@@ -39,7 +39,7 @@ class CloudRuntimeTests(unittest.TestCase):
     def _cloud_env(self) -> dict[str, str]:
         return {
             "WEEX_APPROVAL_TOKEN_SECRET": "S" * 48,
-            "WEEX_SERVICE_AUTH_TOKEN": "cloud-service-token",
+            "WEEX_SERVICE_AUTH_TOKEN": "T" * 48,
             "WEEX_TRADE_ENABLED": "false",
             "WEEX_APPROVAL_TOKEN_TTL_SECONDS": "90",
             "WEEX_ALLOWED_ORIGINS": "https://mcp.example.com, https://agent.example.com",
@@ -72,7 +72,20 @@ class CloudRuntimeTests(unittest.TestCase):
         self.assertEqual(settings.account_timeout_seconds, 7.0)
         self.assertEqual(settings.allowed_origins, ("https://mcp.example.com", "https://agent.example.com"))
         self.assertNotIn("S" * 48, repr(settings))
-        self.assertNotIn("cloud-service-token", repr(settings))
+        self.assertNotIn("T" * 48, repr(settings))
+
+    def test_service_bearer_requires_at_least_32_ascii_characters(self):
+        from weex_mcp.settings import Settings
+
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            Settings.from_environment(
+                self._cloud_env() | {"WEEX_SERVICE_AUTH_TOKEN": "short-service-token"},
+                require_cloud=True,
+            )
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            Settings(service_auth_token="x" * 31)
+
+        self.assertEqual(Settings(service_auth_token="x" * 32).service_auth_token, "x" * 32)
 
     def test_environment_parses_https_upstreams_and_market_retry_settings(self):
         from weex_mcp.settings import Settings
@@ -217,11 +230,11 @@ class CloudRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "ASCII"):
             Settings.from_environment(
-                self._cloud_env() | {"WEEX_SERVICE_AUTH_TOKEN": "cloud-tokén"},
+                self._cloud_env() | {"WEEX_SERVICE_AUTH_TOKEN": ("x" * 31) + "é"},
                 require_cloud=True,
             )
         with self.assertRaisesRegex(ValueError, "ASCII"):
-            Settings(service_auth_token="direct-tokén")
+            Settings(service_auth_token=("x" * 31) + "é")
 
     def test_local_environment_still_allows_embedded_defaults(self):
         from weex_mcp.service import build_default_service
@@ -243,16 +256,16 @@ class CloudRuntimeTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ready"])
         self.assertNotIn("S" * 48, body.decode())
-        self.assertNotIn("cloud-service-token", body.decode())
+        self.assertNotIn("T" * 48, body.decode())
 
     def test_serve_cli_keeps_local_flags_and_dispatches_cloud_server(self):
         from weex_mcp.__main__ import main
 
         with patch.dict(os.environ, self._cloud_env(), clear=True), patch("weex_mcp.cloud.run_cloud_server") as run_server:
-            result = main(["serve", "--host", "127.0.0.1", "--port", "9090", "--workers", "2"])
+            result = main(["serve", "--host", "0.0.0.0", "--port", "9090", "--workers", "2"])
 
         self.assertEqual(result, 0)
-        run_server.assert_called_once_with(host="127.0.0.1", port=9090, workers=2)
+        run_server.assert_called_once_with(host="0.0.0.0", port=9090, workers=2)
 
     def test_serve_cli_and_docker_healthcheck_share_the_environment_port(self):
         from pathlib import Path
@@ -264,11 +277,22 @@ class CloudRuntimeTests(unittest.TestCase):
             result = main(["serve"])
 
         self.assertEqual(result, 0)
-        run_server.assert_called_once_with(host="0.0.0.0", port=9191, workers=1)
+        run_server.assert_called_once_with(host="127.0.0.1", port=9191, workers=1)
         dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
         self.assertIn("WEEX_MCP_PORT=8080", dockerfile)
         self.assertIn("os.environ", dockerfile)
         self.assertNotIn("127.0.0.1:8080/readyz", dockerfile)
+        self.assertIn('["weex-mcp", "serve", "--host", "0.0.0.0"', dockerfile)
+
+    def test_serve_cli_allows_an_explicit_environment_bind_host(self):
+        from weex_mcp.__main__ import main
+
+        environment = self._cloud_env() | {"WEEX_MCP_BIND_HOST": "192.168.1.20"}
+        with patch.dict(os.environ, environment, clear=True), patch("weex_mcp.cloud.run_cloud_server") as run_server:
+            result = main(["serve"])
+
+        self.assertEqual(result, 0)
+        run_server.assert_called_once_with(host="192.168.1.20", port=8080, workers=1)
 
     def test_serve_cli_reports_invalid_cloud_configuration_without_traceback(self):
         from weex_mcp.__main__ import main
