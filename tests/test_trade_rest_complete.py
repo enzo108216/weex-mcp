@@ -247,7 +247,7 @@ class TradeRestCompleteTests(unittest.TestCase):
             arguments
             | {
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
 

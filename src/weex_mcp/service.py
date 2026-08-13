@@ -10,7 +10,7 @@ from .adapters.market import MarketPriceAdapter, WeexMarketRestAdapter
 from .adapters.trade_guard import FailClosedTradeAdapter, TradeGuardAdapter
 from .adapters.trade_rest import WeexTradeRestAdapter
 from .approval_token import ApprovalTokenCodec
-from .audit import AuditSink, LoggingAuditSink
+from .audit import AuditSink, FileAuditSink, LoggingAuditSink
 from .credential_context import CredentialContext, CredentialError
 from .response import error_response, jsonrpc_error, jsonrpc_result, mcp_call_tool_result
 from .schema_validation import SchemaValidationError, validate_tool_arguments
@@ -392,6 +392,10 @@ def build_default_service(
             )
         else:
             active_trade_adapter = FailClosedTradeAdapter()
+    active_audit_sink = audit_sink
+    if active_audit_sink is None:
+        active_audit_sink = FileAuditSink(settings.audit_log_file) if settings.audit_log_file else LoggingAuditSink()
+
     return McpService(
         settings=settings,
         registry=build_default_registry(),
@@ -408,5 +412,5 @@ def build_default_service(
             timeout_seconds=settings.account_timeout_seconds,
         ),
         trade_adapter=active_trade_adapter,
-        audit_sink=audit_sink or LoggingAuditSink(),
+        audit_sink=active_audit_sink,
     )

@@ -25,7 +25,7 @@ class Settings:
 
     trade_enabled: bool = False
     approval_token_secret: str = field(default="", repr=False)
-    approval_token_ttl_seconds: int = 120
+    approval_token_ttl_seconds: int = 300
     server_name: str = "weex-mcp"
     server_version: str = __version__
     protocol_version: str = "2026-07-28"
@@ -38,6 +38,7 @@ class Settings:
     futures_base_url: str = FUTURES_BASE_URL
     service_auth_token: str = field(default="", repr=False)
     allowed_origins: tuple[str, ...] = ()
+    audit_log_file: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.trade_enabled, bool):
@@ -81,6 +82,9 @@ class Settings:
             "futures_base_url",
             _normalize_https_origin(self.futures_base_url, "WEEX_FUTURES_BASE_URL"),
         )
+        if not isinstance(self.audit_log_file, str):
+            raise SettingsError("audit_log_file must be a string.")
+        object.__setattr__(self, "audit_log_file", self.audit_log_file.strip())
 
     @classmethod
     def from_environment(
@@ -156,6 +160,7 @@ class Settings:
             ),
             service_auth_token=service_auth_token,
             allowed_origins=_parse_allowed_origins(source.get("WEEX_ALLOWED_ORIGINS", "")),
+            audit_log_file=source.get("WEEX_AUDIT_LOG_FILE", defaults.audit_log_file),
         )
 
 

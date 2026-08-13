@@ -12,7 +12,7 @@ def credential(api_key="AK_TRADE"):
 
 
 def confirmation():
-    return {"accepted": True, "reply_text": "确认"}
+    return {"accepted": True}
 
 
 def cases():
@@ -256,6 +256,8 @@ class OmittedTradeCapabilityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "missing_fields")
         self.assertEqual(result["error"]["details"]["fields"], ["orders"])
+        self.assertIs(result["clarification_required"], True)
+        self.assertEqual(result["clarification_prompt"], "Please provide the following missing fields: orders.")
         self.assertEqual(adapter.preview_actions, [])
 
 

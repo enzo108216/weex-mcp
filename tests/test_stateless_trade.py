@@ -126,6 +126,75 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertFalse(hasattr(service, "preview_store"))
         self.assertFalse(hasattr(service, "idempotency_store"))
 
+    def test_preview_missing_fields_returns_concatenated_clarification_prompt(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        arguments = self._order()
+        del arguments["symbol"]
+        del arguments["quantity"]
+
+        result = self._call(
+            build_default_service(trade_enabled=True, trade_adapter=adapter),
+            "trade_preview_order",
+            arguments,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_fields")
+        self.assertEqual(result["error"]["details"]["fields"], ["symbol", "quantity"])
+        self.assertIs(result["clarification_required"], True)
+        self.assertEqual(result["clarification_prompt"], "Please provide the following missing fields: symbol, quantity.")
+        self.assertEqual(adapter.preview_calls, 0)
+
+    def test_confirm_missing_fields_does_not_return_preview_clarification(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        arguments = self._order()
+        preview = self._call(service, "trade_preview_order", arguments)
+        del arguments["quantity"]
+
+        result = self._call(
+            service,
+            "trade_confirm_order",
+            arguments
+            | {
+                "preview_id": preview["preview_id"],
+                "confirmation": {"accepted": True},
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_fields")
+        self.assertNotIn("clarification_required", result)
+        self.assertNotIn("clarification_prompt", result)
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_cancel_preview_missing_identifier_returns_clarification_prompt(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        result = self._call(
+            build_default_service(trade_enabled=True, trade_adapter=adapter),
+            "trade_preview_cancel_order",
+            {
+                "market": "spot",
+                "trading_mode": "live",
+                "credential": self._credential(),
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["details"]["fields"], ["order_id", "client_order_id"])
+        self.assertIs(result["clarification_required"], True)
+        self.assertEqual(
+            result["clarification_prompt"],
+            "Please provide the following missing fields: order_id, client_order_id.",
+        )
+        self.assertEqual(adapter.preview_calls, 0)
+
     def test_confirm_rechecks_full_order_before_execution(self):
         from weex_mcp.service import build_default_service
 
@@ -136,6 +205,8 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertTrue(preview["ok"])
         self.assertIn("preview_id", preview)
         self.assertNotIn("approval_token", preview)
+        self.assertIs(preview["user_confirmation"]["accepted"], True)
+        self.assertNotIn("reply_text", preview["user_confirmation"])
 
         confirmed = self._call(
             service,
@@ -143,7 +214,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
 
@@ -165,7 +236,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "approval_token": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
 
@@ -187,7 +258,7 @@ class StatelessTradeTests(unittest.TestCase):
             | {
                 "preview_id": preview["preview_id"],
                 "approval_token": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
 
@@ -211,7 +282,7 @@ class StatelessTradeTests(unittest.TestCase):
             | {
                 "quantity": "2",
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         self.assertFalse(changed["ok"])
@@ -225,7 +296,7 @@ class StatelessTradeTests(unittest.TestCase):
             | {
                 "credential": self._credential("AK_TWO"),
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         self.assertFalse(changed_credential["ok"])
@@ -250,7 +321,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
 
@@ -269,7 +340,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "preview_id": preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         self.assertFalse(rejected["ok"])
@@ -325,7 +396,7 @@ class StatelessTradeTests(unittest.TestCase):
                     arguments
                     | {
                         "preview_id": preview["preview_id"],
-                        "confirmation": {"accepted": True, "reply_text": "确认"},
+                        "confirmation": {"accepted": True},
                     },
                 )
                 self.assertTrue(confirmed["ok"])
@@ -348,7 +419,7 @@ class StatelessTradeTests(unittest.TestCase):
             order
             | {
                 "preview_id": cancel_preview["preview_id"],
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         self.assertEqual(wrong_action["error"]["code"], "approval_mismatch")
@@ -360,7 +431,7 @@ class StatelessTradeTests(unittest.TestCase):
             order
             | {
                 "preview_id": token[:-1] + ("A" if token[-1] != "A" else "B"),
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         self.assertEqual(tampered["error"]["code"], "approval_token_invalid")
@@ -371,7 +442,7 @@ class StatelessTradeTests(unittest.TestCase):
             order
             | {
                 "preview_id": token,
-                "confirmation": {"accepted": False, "reply_text": "确认"},
+                "confirmation": {"accepted": False},
             },
         )
         self.assertEqual(rejected["error"]["code"], "invalid_arguments")
@@ -386,7 +457,7 @@ class StatelessTradeTests(unittest.TestCase):
         preview = self._call(service, "trade_preview_order", arguments)
         confirmation = arguments | {
             "preview_id": preview["preview_id"],
-            "confirmation": {"accepted": True, "reply_text": "确认"},
+            "confirmation": {"accepted": True},
         }
 
         first = self._call(service, "trade_confirm_order", confirmation)
@@ -416,7 +487,7 @@ class StatelessTradeTests(unittest.TestCase):
             arguments
             | {
                 "preview_id": "not-a-token",
-                "confirmation": {"accepted": True, "reply_text": "确认"},
+                "confirmation": {"accepted": True},
             },
         )
         encoded_failure = json.dumps(failure, ensure_ascii=False)

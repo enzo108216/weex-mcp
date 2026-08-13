@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 _SENSITIVE_KEY_FRAGMENTS = (
@@ -69,6 +70,23 @@ class LoggingAuditSink:
     def record(self, event: dict[str, Any]) -> None:
         safe_event = redact_secrets(event)
         self._logger.info("weex_mcp_audit %s", json.dumps(safe_event, ensure_ascii=False, sort_keys=True))
+
+
+class FileAuditSink:
+    """Append one redacted JSON object per line to a local audit file."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._lock = threading.Lock()
+
+    def record(self, event: dict[str, Any]) -> None:
+        safe_event = redact_secrets(event)
+        serialized = json.dumps(safe_event, ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.write("\n")
 
 
 class MemoryAuditSink:

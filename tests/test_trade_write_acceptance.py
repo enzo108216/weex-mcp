@@ -40,7 +40,7 @@ class TradeWriteAcceptanceDriverTests(unittest.TestCase):
         confirmed = MODULE.confirm_arguments(arguments, "preview-token")
         self.assertEqual(confirmed["preview_id"], "preview-token")
         self.assertNotIn("approval_token", confirmed)
-        self.assertEqual(confirmed["confirmation"], {"accepted": True, "reply_text": "确认"})
+        self.assertEqual(confirmed["confirmation"], {"accepted": True})
 
     def test_call_tool_blocks_unexpected_tools(self):
         with self.assertRaisesRegex(RuntimeError, "unsafe tool blocked"):

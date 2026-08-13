@@ -7,6 +7,31 @@ class ApprovalTokenTests(unittest.TestCase):
 
         self.assertEqual(Settings().approval_token_secret, "")
 
+    def test_default_preview_id_ttl_is_five_minutes(self):
+        from weex_mcp.approval_token import ApprovalTokenCodec
+        from weex_mcp.settings import Settings
+
+        settings = Settings()
+        self.assertEqual(settings.approval_token_ttl_seconds, 300)
+
+        clock = [1_700_000_000.0]
+        codec = ApprovalTokenCodec(
+            secret="s" * 32,
+            ttl_seconds=settings.approval_token_ttl_seconds,
+            time_func=lambda: clock[0],
+        )
+        token = codec.issue(
+            action="order",
+            credential_fingerprint="fp_123",
+            summary={"action": "order"},
+            risk={"status": "review_required"},
+            risk_signature="risk-1",
+        )
+
+        claims = codec.verify(token)
+
+        self.assertEqual(claims["expires_at"] - claims["issued_at"], 300)
+
     def test_issue_and_verify_round_trip_without_server_state(self):
         from weex_mcp.approval_token import ApprovalTokenCodec
 

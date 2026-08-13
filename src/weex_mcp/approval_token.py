@@ -24,7 +24,7 @@ class ApprovalTokenCodec:
         self,
         *,
         secret: str,
-        ttl_seconds: int = 120,
+        ttl_seconds: int = 300,
         time_func: Callable[[], float] | None = None,
     ):
         secret_bytes = secret.encode("utf-8")

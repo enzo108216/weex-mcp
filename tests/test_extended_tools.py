@@ -368,7 +368,7 @@ class ExtendedToolTests(unittest.TestCase):
                         "quantity": "1",
                         "client_order_id": "wrong-action-order-1",
                         "preview_id": preview["result"]["preview_id"],
-                        "confirmation": {"accepted": True, "reply_text": "确认"},
+                        "confirmation": {"accepted": True},
                         "credential": self._trade_credential(),
                     },
                 },

@@ -9,7 +9,7 @@ from ..credential_context import CredentialContext, CredentialError
 from ..response import error_response, ok_response
 from ..secret_provider import ResolvedWeexCredential, SecretProviderError
 from ..tenant_context import TenantContext
-from ..trade_execution import CONFIRMATION_REPLY_TEXT, TradeExecution
+from ..trade_execution import TradeExecution
 
 _ORDER_REQUIRED_FIELDS = (
     "market",
@@ -92,11 +92,13 @@ def preview_cancel_order(
     adapter: TradeGuardAdapter,
 ) -> dict[str, Any]:
     if not arguments.get("order_id") and not arguments.get("client_order_id"):
-        return error_response(
-            "missing_fields",
-            "Trade cancel preview requires order_id or client_order_id.",
-            details={"fields": ["order_id", "client_order_id"]},
-            audit=context.audit_dict(),
+        return _with_clarification(
+            error_response(
+                "missing_fields",
+                "Trade cancel preview requires order_id or client_order_id.",
+                details={"fields": ["order_id", "client_order_id"]},
+                audit=context.audit_dict(),
+            )
         )
     return _preview_trade_action(
         arguments,
@@ -310,7 +312,7 @@ def _preview_trade_action(
         preview_method=preview_method,
     )
     if isinstance(prepared, dict):
-        return prepared
+        return _with_clarification(prepared)
     execution, resolved, credential = prepared
     try:
         token = approval_codec.issue(
@@ -330,10 +332,10 @@ def _preview_trade_action(
         summary=execution.summary,
         risk=execution.risk,
         user_confirmation={
-            "reply_text": CONFIRMATION_REPLY_TEXT,
+            "accepted": True,
             "reply_instruction": (
                 "To accept the stated risks and continue, resubmit the complete original parameters, "
-                "the preview_id, and the required confirmation object."
+                "the preview_id, and confirmation.accepted=true."
             ),
         },
         audit=context.audit_dict() | credential.safe_audit_dict(),
@@ -538,6 +540,20 @@ def _is_missing(arguments: dict[str, Any], field: str) -> bool:
     return field not in arguments or arguments[field] is None or arguments[field] == ""
 
 
+def _with_clarification(result: dict[str, Any]) -> dict[str, Any]:
+    error = result.get("error")
+    if not isinstance(error, dict) or error.get("code") != "missing_fields":
+        return result
+    details = error.get("details")
+    fields = details.get("fields") if isinstance(details, dict) else None
+    if not isinstance(fields, list) or not fields:
+        return result
+    result["clarification_required"] = True
+    field_list = ", ".join(str(field) for field in fields)
+    result["clarification_prompt"] = f"Please provide the following missing fields: {field_list}."
+    return result
+
+
 def _claims_match_execution(
     claims: dict[str, Any],
     *,
@@ -558,8 +574,6 @@ def _validate_confirmation(raw: Any) -> str | None:
         return "confirmation must be an object."
     if raw.get("accepted") is not True:
         return "confirmation.accepted must be true."
-    if str(raw.get("reply_text") or "").strip() != CONFIRMATION_REPLY_TEXT:
-        return "confirmation.reply_text must match the required confirmation value."
     return None
 
 

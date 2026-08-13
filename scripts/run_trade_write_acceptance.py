@@ -14,7 +14,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 MAX_NOTIONAL_USDT = Decimal("10")
-CONFIRMATION = {"accepted": True, "reply_text": "确认"}
+CONFIRMATION = {"accepted": True}
 ALLOWED_TOOL_PREFIXES = ("market_get_", "account_get_", "trade_preview_", "trade_confirm_")
 DISALLOWED_ACCOUNT_TOOLS = {"account_get_transfer_records"}
 RESULT_PATH = Path("/tmp/wwld-15863-trade-write.json")

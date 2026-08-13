@@ -136,7 +136,12 @@ secrets, keeps Trade disabled, builds the image, starts the container in the
 background, and waits for `/readyz`. It never overwrites an existing `.env`
 and never generates or stores a WEEX user API credential. The default endpoint
 is `http://127.0.0.1:8080/mcp`; the generated service bearer token is in the
-local `.env` file. Stop it with:
+local `.env` file. Docker also writes redacted account/trade audit events to
+`logs/weex_mcp_audit.log` on the host by mapping the container path configured
+by `WEEX_AUDIT_LOG_FILE` (`/var/log/weex-mcp/weex_mcp_audit.log` by default).
+The startup script creates `./logs` and records the current host UID/GID in
+`.env` so the non-root container process can append to the mounted audit file.
+Stop it with:
 
 ```bash
 docker compose down
@@ -280,6 +285,16 @@ must not be placed in URLs or query parameters. HTTP deployments must use TLS
 and must disable request-body capture in proxies, application monitoring,
 tracing, and error-reporting systems.
 
+When `WEEX_AUDIT_LOG_FILE` is set, the default service appends local audit
+records as JSON Lines. Each line is one redacted account or trade tool event
+with fields such as tool name, module, success status, request identity, and
+credential fingerprint; raw API keys, secrets, passphrases, and credential refs
+are not written. The Docker Compose configuration sets this variable to
+`/var/log/weex-mcp/weex_mcp_audit.log` and mounts it to
+`logs/weex_mcp_audit.log` on the host. Without `WEEX_AUDIT_LOG_FILE`, audit
+events are emitted through the `weex_mcp.audit` Python logger instead of being
+written by the MCP to a file.
+
 The `credential_ref` and `encrypted_envelope` forms remain extension points
 for hosts that provide a compatible secret resolver. Tenant, user, and session
 headers are optional; absent values resolve to an anonymous internal context.
@@ -309,9 +324,9 @@ does not prove what WEEX granted to the API key. A failed authentication,
 `canTrade=false`, or malformed permission response never produces a preview
 ID. Preview itself sends no private write request.
 
-For compatibility with the current tool schema, `confirmation.reply_text`
-uses the exact protocol value `确认`. This value is part of the request contract
-and is not a free-form user message.
+Explicit confirmation uses the language-independent object
+`{"accepted": true}`. Confirmation is still bound to the signed preview and
+does not replace the requirement to display the preview to the user.
 
 Preview IDs can be replayed until expiry. Order operations therefore
 require a stable `client_order_id` for exchange-side correlation and recovery.

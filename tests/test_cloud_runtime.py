@@ -62,6 +62,7 @@ class CloudRuntimeTests(unittest.TestCase):
             "WEEX_MAX_REQUEST_BYTES": "2097152",
             "WEEX_MARKET_TIMEOUT_SECONDS": "3.5",
             "WEEX_ACCOUNT_TIMEOUT_SECONDS": "7",
+            "WEEX_AUDIT_LOG_FILE": "/var/log/weex-mcp/audit.log",
         }
         settings = Settings.from_environment(environment, require_cloud=True)
 
@@ -71,6 +72,7 @@ class CloudRuntimeTests(unittest.TestCase):
         self.assertEqual(settings.market_timeout_seconds, 3.5)
         self.assertEqual(settings.account_timeout_seconds, 7.0)
         self.assertEqual(settings.allowed_origins, ("https://mcp.example.com", "https://agent.example.com"))
+        self.assertEqual(settings.audit_log_file, "/var/log/weex-mcp/audit.log")
         self.assertNotIn("S" * 48, repr(settings))
         self.assertNotIn("T" * 48, repr(settings))
 
@@ -283,6 +285,29 @@ class CloudRuntimeTests(unittest.TestCase):
         self.assertIn("os.environ", dockerfile)
         self.assertNotIn("127.0.0.1:8080/readyz", dockerfile)
         self.assertIn('["weex-mcp", "serve", "--host", "0.0.0.0"', dockerfile)
+
+    def test_compose_wires_file_audit_log_to_host_volume(self):
+        from pathlib import Path
+
+        project = Path(__file__).resolve().parents[1]
+        compose = (project / "compose.yaml").read_text()
+        startup = (project / "scripts" / "docker-start.sh").read_text()
+
+        self.assertIn("WEEX_AUDIT_LOG_FILE", compose)
+        self.assertIn("/var/log/weex-mcp/weex_mcp_audit.log", compose)
+        self.assertIn("./logs:/var/log/weex-mcp", compose)
+        self.assertIn("WEEX_MCP_CONTAINER_UID", compose)
+        self.assertIn("mkdir -p \"$PROJECT_ROOT/logs\"", startup)
+        self.assertIn("WEEX_AUDIT_LOG_FILE=/var/log/weex-mcp/weex_mcp_audit.log", startup)
+        self.assertIn('WEEX_MCP_CONTAINER_UID="$CONTAINER_UID"', startup)
+        self.assertIn('WEEX_MCP_CONTAINER_GID="$CONTAINER_GID"', startup)
+
+    def test_compose_uses_five_minute_default_preview_id_ttl(self):
+        from pathlib import Path
+
+        compose = (Path(__file__).resolve().parents[1] / "compose.yaml").read_text()
+
+        self.assertIn("WEEX_APPROVAL_TOKEN_TTL_SECONDS: ${WEEX_APPROVAL_TOKEN_TTL_SECONDS:-300}", compose)
 
     def test_serve_cli_allows_an_explicit_environment_bind_host(self):
         from weex_mcp.__main__ import main

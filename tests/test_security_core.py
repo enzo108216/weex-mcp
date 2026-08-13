@@ -1,7 +1,9 @@
 import json
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 
 class CredentialContextTests(unittest.TestCase):
@@ -162,6 +164,36 @@ class CredentialContextTests(unittest.TestCase):
         for forbidden in ["AK", "SK", "PP", "SIG", "CIPHERTEXT"]:
             self.assertNotIn(forbidden, serialized)
         self.assertEqual(redacted["api_key"], "[REDACTED]")
+
+    def test_file_audit_sink_appends_jsonl_without_exposing_secrets(self):
+        from weex_mcp.audit import FileAuditSink
+
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "nested" / "audit.log"
+            sink = FileAuditSink(audit_path)
+
+            sink.record(
+                {
+                    "tool_name": "trade_preview_order",
+                    "module": "trade",
+                    "api_key": "AK_FILE",
+                    "api_secret": "SK_FILE",
+                    "api_passphrase": "PP_FILE",
+                    "success": True,
+                }
+            )
+
+            lines = audit_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(lines), 1)
+        payload = json.loads(lines[0])
+        self.assertEqual(payload["tool_name"], "trade_preview_order")
+        self.assertEqual(payload["module"], "trade")
+        self.assertEqual(payload["success"], True)
+        serialized = json.dumps(payload, sort_keys=True)
+        for forbidden in ("AK_FILE", "SK_FILE", "PP_FILE"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(payload["api_key"], "[REDACTED]")
 
     def test_redaction_removes_secret_assignments_embedded_in_strings(self):
         from weex_mcp.audit import redact_secrets

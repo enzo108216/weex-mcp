@@ -2,6 +2,16 @@ import unittest
 
 
 class ToolSchemaTests(unittest.TestCase):
+    def test_tool_output_schema_declares_preview_clarification_fields(self):
+        from weex_mcp.tool_registry import build_default_registry
+
+        tool = build_default_registry().get_tool("trade_preview_order")
+
+        self.assertIsNotNone(tool)
+        output_schema = tool.to_mcp_tool()["outputSchema"]
+        self.assertEqual(output_schema["properties"]["clarification_required"], {"type": "boolean"})
+        self.assertEqual(output_schema["properties"]["clarification_prompt"], {"type": "string"})
+
     def test_tools_expose_strict_top_level_input_schemas(self):
         from weex_mcp.tool_registry import build_default_registry
 
@@ -42,7 +52,8 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertNotIn("idempotency_key", confirm_schema["properties"])
         self.assertIn("preview_id", confirm_schema["properties"])
         self.assertIn("approval_token", confirm_schema["properties"])
-        self.assertEqual(confirm_schema["properties"]["confirmation"]["required"], ["accepted", "reply_text"])
+        self.assertEqual(confirm_schema["properties"]["confirmation"]["required"], ["accepted"])
+        self.assertEqual(set(confirm_schema["properties"]["confirmation"]["properties"]), {"accepted"})
 
         from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
 
@@ -60,7 +71,7 @@ class ToolSchemaTests(unittest.TestCase):
                 "api_secret": "SK",
                 "api_passphrase": "PP",
             },
-            "confirmation": {"accepted": True, "reply_text": "确认"},
+            "confirmation": {"accepted": True},
         }
         validate_tool_arguments(base | {"preview_id": "signed"}, confirm_schema)
         validate_tool_arguments(base | {"approval_token": "legacy-signed"}, confirm_schema)
@@ -69,6 +80,11 @@ class ToolSchemaTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             validate_tool_arguments(
                 base | {"preview_id": "signed", "approval_token": "legacy-signed"},
+                confirm_schema,
+            )
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments(
+                base | {"preview_id": "signed", "confirmation": {"accepted": True, "reply_text": "确认"}},
                 confirm_schema,
             )
 
@@ -567,10 +583,10 @@ class ToolSchemaTests(unittest.TestCase):
         confirm_schema = tools["trade_confirm_order"]["inputSchema"]
         valid_confirm = valid_spot_market | {
             "preview_id": "signed-token",
-            "confirmation": {"accepted": True, "reply_text": "确认"},
+            "confirmation": {"accepted": True},
         }
         validate_tool_arguments(valid_confirm, confirm_schema)
-        for confirmation in ({"accepted": False, "reply_text": "确认"}, {"accepted": True, "reply_text": "yes"}):
+        for confirmation in ({"accepted": False}, {"accepted": True, "reply_text": "确认"}):
             with self.subTest(confirmation=confirmation):
                 with self.assertRaises(SchemaValidationError):
                     validate_tool_arguments(valid_confirm | {"confirmation": confirmation}, confirm_schema)

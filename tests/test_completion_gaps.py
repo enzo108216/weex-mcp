@@ -283,7 +283,7 @@ class CompletionGapTests(unittest.TestCase):
                         "quantity": "1",
                         "client_order_id": "reject-order-1",
                         "preview_id": preview["result"]["preview_id"],
-                        "confirmation": {"accepted": True, "reply_text": "确认"},
+                        "confirmation": {"accepted": True},
                         "credential": self._trade_credential(),
                     },
                 },
@@ -355,6 +355,57 @@ class CompletionGapTests(unittest.TestCase):
         self.assertEqual(len(sink.events), 2)
         self.assertEqual(sink.events[1]["tool_name"], "trade_preview_order")
         self.assertFalse(sink.events[1]["success"])
+
+    def test_default_service_uses_configured_file_audit_sink(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from weex_mcp.service import build_default_service
+        from weex_mcp.settings import Settings
+        from weex_mcp.tenant_context import TenantContext
+
+        class AccountAdapter:
+            def get_balance(self, **kwargs):
+                return {"balances": []}
+
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "weex_mcp_audit.log"
+            service = build_default_service(
+                settings=Settings(audit_log_file=str(audit_path)),
+                account_adapter=AccountAdapter(),
+            )
+            response = service.handle_jsonrpc(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "file-audit-account",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "account_get_balance",
+                        "arguments": {
+                            "market": "spot",
+                            "trading_mode": "live",
+                            "credential": {
+                                "type": "plaintext",
+                                "api_key": "AK_FILE_SERVICE",
+                                "api_secret": "SK_FILE_SERVICE",
+                                "api_passphrase": "PP_FILE_SERVICE",
+                            },
+                        },
+                    },
+                },
+                context=TenantContext(tenant_id="tenant", user_id="user", session_id="session"),
+            )
+            lines = audit_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertTrue(response["result"]["ok"])
+        self.assertEqual(len(lines), 1)
+        event = json.loads(lines[0])
+        self.assertEqual(event["tool_name"], "account_get_balance")
+        self.assertTrue(event["success"])
+        serialized = json.dumps(event, sort_keys=True)
+        for forbidden in ("AK_FILE_SERVICE", "SK_FILE_SERVICE", "PP_FILE_SERVICE"):
+            self.assertNotIn(forbidden, serialized)
 
     def test_non_object_params_return_invalid_params(self):
         from weex_mcp.service import build_default_service

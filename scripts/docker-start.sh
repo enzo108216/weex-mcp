@@ -8,6 +8,8 @@ START_TIMEOUT=${WEEX_MCP_START_TIMEOUT_SECONDS:-120}
 MCP_PORT=${WEEX_MCP_PORT:-}
 HOST_PORT=${WEEX_MCP_HOST_PORT:-}
 BIND_HOST=${WEEX_MCP_BIND_HOST:-}
+CONTAINER_UID=${WEEX_MCP_CONTAINER_UID:-}
+CONTAINER_GID=${WEEX_MCP_CONTAINER_GID:-}
 
 if [ -e "$ENV_FILE" ]; then
     if [ -z "$MCP_PORT" ]; then
@@ -19,10 +21,18 @@ if [ -e "$ENV_FILE" ]; then
     if [ -z "$BIND_HOST" ]; then
         BIND_HOST=$(awk -F= '$1 == "WEEX_MCP_BIND_HOST" {print $2; exit}' "$ENV_FILE")
     fi
+    if [ -z "$CONTAINER_UID" ]; then
+        CONTAINER_UID=$(awk -F= '$1 == "WEEX_MCP_CONTAINER_UID" {print $2; exit}' "$ENV_FILE")
+    fi
+    if [ -z "$CONTAINER_GID" ]; then
+        CONTAINER_GID=$(awk -F= '$1 == "WEEX_MCP_CONTAINER_GID" {print $2; exit}' "$ENV_FILE")
+    fi
 fi
 MCP_PORT=${MCP_PORT:-8080}
 HOST_PORT=${HOST_PORT:-8080}
 BIND_HOST=${BIND_HOST:-127.0.0.1}
+CONTAINER_UID=${CONTAINER_UID:-$(id -u)}
+CONTAINER_GID=${CONTAINER_GID:-$(id -g)}
 
 generate_secret() {
     if command -v openssl >/dev/null 2>&1; then
@@ -45,6 +55,7 @@ if ! docker compose version >/dev/null 2>&1; then
     printf '%s\n' 'docker-start: Docker Compose v2 is required.' >&2
     exit 1
 fi
+mkdir -p "$PROJECT_ROOT/logs"
 
 if [ ! -e "$ENV_FILE" ]; then
     ENV_DIR=$(dirname -- "$ENV_FILE")
@@ -62,6 +73,9 @@ if [ ! -e "$ENV_FILE" ]; then
         printf 'WEEX_MCP_PORT=%s\n' "$MCP_PORT"
         printf 'WEEX_MCP_HOST_PORT=%s\n' "$HOST_PORT"
         printf 'WEEX_MCP_BIND_HOST=%s\n' "$BIND_HOST"
+        printf '%s\n' 'WEEX_AUDIT_LOG_FILE=/var/log/weex-mcp/weex_mcp_audit.log'
+        printf 'WEEX_MCP_CONTAINER_UID=%s\n' "$CONTAINER_UID"
+        printf 'WEEX_MCP_CONTAINER_GID=%s\n' "$CONTAINER_GID"
     } >"$ENV_FILE"
     chmod 600 "$ENV_FILE"
     printf 'Created private Docker configuration: %s\n' "$ENV_FILE"
@@ -69,7 +83,10 @@ else
     printf 'Using existing Docker configuration: %s\n' "$ENV_FILE"
 fi
 
-WEEX_MCP_ENV_FILE="$ENV_FILE" docker compose \
+WEEX_MCP_ENV_FILE="$ENV_FILE" \
+WEEX_MCP_CONTAINER_UID="$CONTAINER_UID" \
+WEEX_MCP_CONTAINER_GID="$CONTAINER_GID" \
+docker compose \
     --project-directory "$PROJECT_ROOT" \
     --env-file "$ENV_FILE" \
     up --detach --build --wait --wait-timeout "$START_TIMEOUT"

@@ -48,7 +48,7 @@ def credential():
 
 
 def confirmation():
-    return {"accepted": True, "reply_text": "确认"}
+    return {"accepted": True}
 
 
 class OmittedCapabilityRegistryTests(unittest.TestCase):

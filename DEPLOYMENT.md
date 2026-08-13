@@ -20,8 +20,9 @@ request body and used only for that request.
 | `WEEX_SERVICE_AUTH_TOKEN` | Cloud: yes | Local: empty | Bearer token required by `/mcp`; at least 32 printable ASCII characters without whitespace. Compared in constant time. |
 | `WEEX_MCP_BIND_HOST` | No | `127.0.0.1` | Process or Compose host bind address. Use `0.0.0.0` for all IPv4 interfaces or a specific host interface IP for narrower exposure. |
 | `WEEX_MCP_PORT` | No | `8080` | Default `weex-mcp serve` and container health-check port; an explicit `--port` wins for the process. |
+| `WEEX_MCP_CONTAINER_UID` / `WEEX_MCP_CONTAINER_GID` | Compose: no | `65532` / `65532` | Container runtime user/group. `scripts/docker-start.sh` writes the host UID/GID on first run so the mounted audit directory is writable. |
 | `WEEX_TRADE_ENABLED` | No | `false` | Strict `true`/`false`. Keep false until Trade write access is intentionally enabled. |
-| `WEEX_APPROVAL_TOKEN_TTL_SECONDS` | No | `120` | Positive approval-token lifetime in seconds. |
+| `WEEX_APPROVAL_TOKEN_TTL_SECONDS` | No | `300` | Positive approval-token lifetime in seconds. |
 | `WEEX_ALLOWED_ORIGINS` | No | empty | Comma-separated exact HTTP(S) origins. Wildcards, credentials, paths, query strings, and fragments are rejected. Requests without an `Origin` header remain valid for non-browser MCP clients. |
 | `WEEX_MAX_REQUEST_BYTES` | No | `1048576` | Positive maximum request-body size. |
 | `WEEX_MARKET_TIMEOUT_SECONDS` | No | `5` | Positive finite public Market upstream timeout. |
@@ -31,6 +32,7 @@ request body and used only for that request.
 | `WEEX_SPOT_BASE_URL` | No | `https://api-spot.weex.com` | Deployment-selected Spot HTTPS origin. Paths, credentials, query strings, and fragments are rejected. |
 | `WEEX_FUTURES_BASE_URL` | No | `https://api-contract.weex.com` | Deployment-selected Futures HTTPS origin with the same origin-only validation. |
 | `WEEX_SERVER_NAME` | No | `weex-mcp` | Non-empty service name exposed by health endpoints. |
+| `WEEX_AUDIT_LOG_FILE` | No | empty; Compose default: `/var/log/weex-mcp/weex_mcp_audit.log` | Optional local JSONL audit file for redacted Account/Trade tool events. |
 
 Do not put either required secret in an image, repository, URL, or command-line
 argument. Inject them through the deployment platform's secret mechanism.
@@ -156,6 +158,13 @@ request-body capture in reverse proxies, APM agents, tracing middleware, error
 reporters, and access-log customizations because the body can contain
 `api_key`, `api_secret`, and `api_passphrase`. The built-in Uvicorn access log
 does not log bodies, but surrounding infrastructure must be checked separately.
+
+If `WEEX_AUDIT_LOG_FILE` is set, the service appends one redacted JSON object
+per Account/Trade tool call to that file. The default Compose configuration
+sets it to `/var/log/weex-mcp/weex_mcp_audit.log` and mounts `./logs` from the
+host, so the host file is `logs/weex_mcp_audit.log`. Raw credential values are
+redacted before writing; retain, rotate, and protect the mounted `logs`
+directory according to the deployment's audit policy.
 
 ## Scaling, rotation, and retry boundary
 

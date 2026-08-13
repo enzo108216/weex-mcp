@@ -4,8 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .trade_execution import CONFIRMATION_REPLY_TEXT
-
 _CANONICAL_NONNEGATIVE_INTEGER_PATTERN = r"^(?:0|[1-9][0-9]*)$"
 _CANONICAL_POSITIVE_INTEGER_PATTERN = r"^[1-9][0-9]*$"
 _LONG_MAX = 9_223_372_036_854_775_807
@@ -43,6 +41,8 @@ _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
         "summary": {"type": "object"},
         "risk": {"type": "object"},
         "user_confirmation": {"type": "object"},
+        "clarification_required": {"type": "boolean"},
+        "clarification_prompt": {"type": "string"},
     },
     "additionalProperties": True,
 }
@@ -142,7 +142,7 @@ _FIELD_DESCRIPTIONS = {
     "sl_working_type": "Stop-loss trigger source: MARK_PRICE or CONTRACT_PRICE.",
     "preview_id": "Short-lived signed confirmation credential returned by the matching trade preview.",
     "approval_token": "Deprecated alias for preview_id accepted during client migration.",
-    "confirmation": "Explicit confirmation object; accepted must be true and reply_text must match the schema constant.",
+    "confirmation": "Explicit confirmation object; accepted must be true.",
     "margin_mode": "Futures margin mode: cross or isolated.",
     "leverage": "Requested futures leverage as a positive decimal string.",
     "separated_type": "Futures margin mode API representation.",
@@ -898,10 +898,9 @@ def build_default_registry() -> ToolRegistry:
     confirmation_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["accepted", "reply_text"],
+        "required": ["accepted"],
         "properties": {
             "accepted": {"type": "boolean", "const": True},
-            "reply_text": {"type": "string", "const": CONFIRMATION_REPLY_TEXT},
         },
     }
 

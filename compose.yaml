@@ -5,6 +5,7 @@ services:
     image: ${WEEX_MCP_IMAGE:-weex-mcp:local}
     build:
       context: .
+    user: "${WEEX_MCP_CONTAINER_UID:-65532}:${WEEX_MCP_CONTAINER_GID:-65532}"
     env_file:
       - ${WEEX_MCP_ENV_FILE:-.env}
     environment:
@@ -12,7 +13,7 @@ services:
       WEEX_SERVICE_AUTH_TOKEN: ${WEEX_SERVICE_AUTH_TOKEN:?Set WEEX_SERVICE_AUTH_TOKEN in the env file}
       WEEX_TRADE_ENABLED: ${WEEX_TRADE_ENABLED:-false}
       WEEX_MCP_PORT: ${WEEX_MCP_PORT:-8080}
-      WEEX_APPROVAL_TOKEN_TTL_SECONDS: ${WEEX_APPROVAL_TOKEN_TTL_SECONDS:-120}
+      WEEX_APPROVAL_TOKEN_TTL_SECONDS: ${WEEX_APPROVAL_TOKEN_TTL_SECONDS:-300}
       WEEX_ALLOWED_ORIGINS: ${WEEX_ALLOWED_ORIGINS:-}
       WEEX_MAX_REQUEST_BYTES: ${WEEX_MAX_REQUEST_BYTES:-1048576}
       WEEX_MARKET_TIMEOUT_SECONDS: ${WEEX_MARKET_TIMEOUT_SECONDS:-5}
@@ -22,8 +23,11 @@ services:
       WEEX_SPOT_BASE_URL: ${WEEX_SPOT_BASE_URL:-https://api-spot.weex.com}
       WEEX_FUTURES_BASE_URL: ${WEEX_FUTURES_BASE_URL:-https://api-contract.weex.com}
       WEEX_SERVER_NAME: ${WEEX_SERVER_NAME:-weex-mcp}
+      WEEX_AUDIT_LOG_FILE: ${WEEX_AUDIT_LOG_FILE:-/var/log/weex-mcp/weex_mcp_audit.log}
     ports:
       - "${WEEX_MCP_BIND_HOST:-127.0.0.1}:${WEEX_MCP_HOST_PORT:-8080}:${WEEX_MCP_PORT:-8080}"
+    volumes:
+      - ./logs:/var/log/weex-mcp
     restart: unless-stopped
     healthcheck:
       test:
