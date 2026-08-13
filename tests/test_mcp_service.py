@@ -144,17 +144,6 @@ class McpServiceTests(unittest.TestCase):
         self.assertEqual(len(names), 47)
         self.assertEqual(sum(name.startswith("trade_") for name in names), 26)
 
-    def test_default_service_includes_trade_tools(self):
-        from weex_mcp.service import build_default_service
-
-        response = build_default_service().handle_jsonrpc(
-            {"jsonrpc": "2.0", "id": "default-tools", "method": "tools/list", "params": {}}
-        )
-
-        names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(names), 47)
-        self.assertEqual(sum(name.startswith("trade_") for name in names), 26)
-
     def test_market_tool_can_run_without_credential(self):
         from weex_mcp.service import build_default_service
         from weex_mcp.tenant_context import TenantContext

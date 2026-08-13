@@ -365,7 +365,7 @@ def build_default_service(
     if trade_enabled is not None and not isinstance(trade_enabled, bool):
         raise ValueError("trade_enabled must be a boolean.")
     if settings is None:
-        settings = Settings(trade_enabled=True if trade_enabled is None else trade_enabled)
+        settings = Settings(trade_enabled=bool(trade_enabled))
     elif trade_enabled is not None and trade_enabled != settings.trade_enabled:
         settings = replace(settings, trade_enabled=trade_enabled)
     active_secret_provider = secret_provider or RequestSecretProvider()

@@ -245,7 +245,7 @@ class PackageContractTests(unittest.TestCase):
             self.assertGreaterEqual(len(values["WEEX_APPROVAL_TOKEN_SECRET"]), 32)
             self.assertGreaterEqual(len(values["WEEX_SERVICE_AUTH_TOKEN"]), 32)
             self.assertNotEqual(values["WEEX_APPROVAL_TOKEN_SECRET"], values["WEEX_SERVICE_AUTH_TOKEN"])
-            self.assertEqual(values["WEEX_TRADE_ENABLED"], "true")
+            self.assertEqual(values["WEEX_TRADE_ENABLED"], "false")
             self.assertEqual(values["WEEX_MCP_PORT"], "19080")
             self.assertEqual(values["WEEX_MCP_HOST_PORT"], "19081")
             self.assertEqual(values["WEEX_MCP_BIND_HOST"], "0.0.0.0")
@@ -328,8 +328,10 @@ class PackageContractTests(unittest.TestCase):
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 47)
-        self.assertEqual(sum(tool["name"].startswith("trade_") for tool in responses[1]["result"]["tools"]), 26)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 21)
+        self.assertFalse(
+            any(tool["name"].startswith("trade_") for tool in responses[1]["result"]["tools"])
+        )
         self.assertNotIn("resultType", responses[1]["result"])
 
     def test_stdio_cli_honors_trade_enabled_environment_setting(self):

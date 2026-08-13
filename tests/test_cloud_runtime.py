@@ -244,7 +244,7 @@ class CloudRuntimeTests(unittest.TestCase):
         service = build_default_service(settings=settings)
 
         self.assertEqual(settings.service_auth_token, "")
-        self.assertTrue(service.settings.trade_enabled)
+        self.assertFalse(service.settings.trade_enabled)
 
     def test_cloud_app_exposes_readyz_without_exposing_secrets(self):
         from weex_mcp.cloud import build_cloud_app

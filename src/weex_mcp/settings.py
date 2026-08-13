@@ -23,7 +23,7 @@ class Settings:
     of the hosting layer.
     """
 
-    trade_enabled: bool = True
+    trade_enabled: bool = False
     approval_token_secret: str = field(default="", repr=False)
     approval_token_ttl_seconds: int = 120
     server_name: str = "weex-mcp"

@@ -41,7 +41,7 @@ def handle_mcp_post(
     if not isinstance(request, dict):
         return HttpResponse(status=400, body=_json_body(jsonrpc_error(None, -32600, "Invalid JSON-RPC request.")))
 
-    active_service = service or build_default_service()
+    active_service = service or build_default_service(trade_enabled=False)
     response = active_service.handle_jsonrpc(
         request,
         context=context,

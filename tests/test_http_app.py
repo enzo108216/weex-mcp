@@ -16,7 +16,6 @@ class HttpAppTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(body["id"], "http_1")
         self.assertIn("tools", body["result"])
-        self.assertEqual(sum(tool["name"].startswith("trade_") for tool in body["result"]["tools"]), 26)
 
     def test_http_post_rejects_secret_material_in_query(self):
         from weex_mcp.http_app import handle_mcp_post
