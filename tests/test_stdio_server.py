@@ -74,7 +74,8 @@ class StdioServerTests(unittest.TestCase):
         )
 
         self.assertEqual(len(responses), 1)
-        self.assertEqual(len(responses[0]["result"]["tools"]), 21)
+        self.assertEqual(len(responses[0]["result"]["tools"]), 47)
+        self.assertEqual(sum(tool["name"].startswith("trade_") for tool in responses[0]["result"]["tools"]), 26)
 
     def test_legacy_initialize_still_negotiates_the_stdio_session(self):
         for version in ("2025-06-18", "2025-11-25"):
@@ -95,7 +96,8 @@ class StdioServerTests(unittest.TestCase):
                 )
 
                 self.assertEqual(responses[0]["result"]["protocolVersion"], version)
-                self.assertEqual(len(responses[1]["result"]["tools"]), 21)
+                self.assertEqual(len(responses[1]["result"]["tools"]), 47)
+                self.assertEqual(sum(tool["name"].startswith("trade_") for tool in responses[1]["result"]["tools"]), 26)
                 self.assertNotIn("resultType", responses[1]["result"])
 
 
