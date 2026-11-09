@@ -121,7 +121,7 @@ precedence over the environment value.
 `GET /healthz` provides liveness status. `GET /readyz` provides readiness
 status. Complete configuration, container, scaling, rotation, and rollback
 requirements are documented in
-[DEPLOYMENT.md](https://github.com/enzo108216/weex-mcp/blob/main/DEPLOYMENT.md).
+[DEPLOYMENT.md](https://github.com/weex-labs/weex-mcp/blob/main/DEPLOYMENT.md).
 
 ### One-command Docker startup
 
@@ -409,7 +409,7 @@ local logs are ignored. Do not commit real service secrets or WEEX credentials.
 
 Confirmed external platform defects and their safe retest conditions are
 tracked in
-[KNOWN_ISSUES.md](https://github.com/enzo108216/weex-mcp/blob/main/KNOWN_ISSUES.md).
+[KNOWN_ISSUES.md](https://github.com/weex-labs/weex-mcp/blob/main/KNOWN_ISSUES.md).
 These records do not constitute
 authorization to submit new trade requests.
 
@@ -426,4 +426,4 @@ implement built-in rate limiting.
 ## License
 
 This project is licensed under the MIT License. See
-[LICENSE](https://github.com/enzo108216/weex-mcp/blob/main/LICENSE).
+[LICENSE](https://github.com/weex-labs/weex-mcp/blob/main/LICENSE).

@@ -28,7 +28,7 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("mcp", project.get("keywords", []))
         for url_name in ("Homepage", "Repository", "Issues", "Documentation"):
             self.assertIn(url_name, project["urls"])
-            self.assertIn("github.com/enzo108216/weex-mcp", project["urls"][url_name])
+            self.assertIn("github.com/weex-labs/weex-mcp", project["urls"][url_name])
 
     def test_mcp_registry_manifest_matches_package_and_readme_marker(self):
         from weex_mcp import __version__
@@ -83,7 +83,7 @@ class PackageContractTests(unittest.TestCase):
         for repository_file in ("DEPLOYMENT.md", "KNOWN_ISSUES.md", "LICENSE"):
             with self.subTest(repository_file=repository_file):
                 self.assertIn(
-                    f"https://github.com/enzo108216/weex-mcp/blob/main/{repository_file}",
+                    f"https://github.com/weex-labs/weex-mcp/blob/main/{repository_file}",
                     readme,
                 )
 

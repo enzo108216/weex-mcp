@@ -6,7 +6,7 @@
   "version": "0.1.0",
   "repository": {
     "source": "github",
-    "url": "https://github.com/enzo108216/weex-mcp"
+    "url": "https://github.com/weex-labs/weex-mcp"
   },
   "packages": [
     {

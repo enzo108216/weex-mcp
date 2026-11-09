@@ -24,10 +24,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/enzo108216/weex-mcp"
-Repository = "https://github.com/enzo108216/weex-mcp"
-Issues = "https://github.com/enzo108216/weex-mcp/issues"
-Documentation = "https://github.com/enzo108216/weex-mcp#readme"
+Homepage = "https://github.com/weex-labs/weex-mcp"
+Repository = "https://github.com/weex-labs/weex-mcp"
+Issues = "https://github.com/weex-labs/weex-mcp/issues"
+Documentation = "https://github.com/weex-labs/weex-mcp#readme"
 
 [project.optional-dependencies]
 server = [
