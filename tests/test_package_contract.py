@@ -37,7 +37,7 @@ class PackageContractTests(unittest.TestCase):
         registry = json.loads((ROOT / "server.json").read_text())
         readme = (ROOT / "README.md").read_text()
 
-        self.assertEqual(registry["name"], "io.github.enzo108216/weex-mcp")
+        self.assertEqual(registry["name"], "io.github.weex-labs/weex-mcp")
         self.assertIn(f'<!-- mcp-name: {registry["name"]} -->', readme)
         self.assertEqual(registry["version"], __version__)
         self.assertEqual(registry["packages"][0]["registryType"], "pypi")

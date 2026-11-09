@@ -1,6 +1,6 @@
 # WEEX MCP
 
-<!-- mcp-name: io.github.enzo108216/weex-mcp -->
+<!-- mcp-name: io.github.weex-labs/weex-mcp -->
 
 WEEX MCP is a Python 3.11+ implementation of Model Context Protocol (MCP)
 tools for WEEX market data, account information, and controlled trade
