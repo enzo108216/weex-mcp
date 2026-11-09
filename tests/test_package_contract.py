@@ -128,6 +128,10 @@ class PackageContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         self.assertRegex(workflow, r"ruff check[^\n]*src[^\n]*tests[^\n]*scripts")
 
+    def test_ci_uses_tracked_env_template_for_compose_validation(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("WEEX_MCP_ENV_FILE=.env.example", workflow)
+
     def test_docker_compose_contract_has_cloud_secrets_port_and_readiness(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertIn("env_file:", compose)
