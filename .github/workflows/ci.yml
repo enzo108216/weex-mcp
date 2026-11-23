@@ -82,6 +82,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Compose configuration
         run: >-
+          WEEX_MCP_ENV_FILE=.env.example
           WEEX_APPROVAL_TOKEN_SECRET=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
           WEEX_SERVICE_AUTH_TOKEN=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
           docker compose config --quiet

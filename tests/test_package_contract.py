@@ -28,7 +28,7 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("mcp", project.get("keywords", []))
         for url_name in ("Homepage", "Repository", "Issues", "Documentation"):
             self.assertIn(url_name, project["urls"])
-            self.assertIn("github.com/enzo108216/weex-mcp", project["urls"][url_name])
+            self.assertIn("github.com/weex-labs/weex-mcp", project["urls"][url_name])
 
     def test_mcp_registry_manifest_matches_package_and_readme_marker(self):
         from weex_mcp import __version__
@@ -37,7 +37,7 @@ class PackageContractTests(unittest.TestCase):
         registry = json.loads((ROOT / "server.json").read_text())
         readme = (ROOT / "README.md").read_text()
 
-        self.assertEqual(registry["name"], "io.github.enzo108216/weex-mcp")
+        self.assertEqual(registry["name"], "io.github.weex-labs/weex-mcp")
         self.assertIn(f'<!-- mcp-name: {registry["name"]} -->', readme)
         self.assertEqual(registry["version"], __version__)
         self.assertEqual(registry["packages"][0]["registryType"], "pypi")
@@ -83,7 +83,7 @@ class PackageContractTests(unittest.TestCase):
         for repository_file in ("DEPLOYMENT.md", "KNOWN_ISSUES.md", "LICENSE"):
             with self.subTest(repository_file=repository_file):
                 self.assertIn(
-                    f"https://github.com/enzo108216/weex-mcp/blob/main/{repository_file}",
+                    f"https://github.com/weex-labs/weex-mcp/blob/main/{repository_file}",
                     readme,
                 )
 
@@ -127,6 +127,10 @@ class PackageContractTests(unittest.TestCase):
     def test_ci_lints_the_demo_smoke_script(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         self.assertRegex(workflow, r"ruff check[^\n]*src[^\n]*tests[^\n]*scripts")
+
+    def test_ci_uses_tracked_env_template_for_compose_validation(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("WEEX_MCP_ENV_FILE=.env.example", workflow)
 
     def test_docker_compose_contract_has_cloud_secrets_port_and_readiness(self):
         compose = (ROOT / "compose.yaml").read_text()
