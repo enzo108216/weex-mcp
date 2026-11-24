@@ -17,10 +17,19 @@ _SENSITIVE_KEY_FRAGMENTS = (
     "signature",
     "ciphertext",
     "private_key",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "refreshtoken",
+    "code_verifier",
+    "codeverifier",
+    "authorization_code",
+    "authorizationcode",
 )
 
 _SENSITIVE_STRING_ASSIGNMENT = re.compile(
-    r"(?i)(api[_-]?key|api[_-]?secret|api[_-]?passphrase|secret|passphrase|signature|ciphertext|private[_-]?key)"
+    r"(?i)(api[_-]?key|api[_-]?secret|api[_-]?passphrase|secret|passphrase|signature|ciphertext|private[_-]?key|"
+    r"access[_-]?token|refresh[_-]?token|code[_-]?verifier|authorization[_-]?code)"
     r"(\s*(?:=|:)\s*)([^\s,;&]+)"
 )
 _BEARER_TOKEN = re.compile(r"(?i)(\bBearer\s+)([^\s,;&]+)")

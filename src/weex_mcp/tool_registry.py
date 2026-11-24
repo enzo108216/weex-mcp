@@ -13,6 +13,7 @@ _FUTURES_ORDER_HISTORY_MAX_RANGE_MS = 90 * _DAY_MS
 _FUTURES_INCOME_MAX_RANGE_MS = 100 * _DAY_MS
 _FUTURES_TRADE_MAX_RANGE_MS = 7 * _DAY_MS
 _DECIMAL_STRING_PATTERN = r"^\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\s*$"
+_OAUTH_SAFE_STRING_PATTERN = r"^[A-Za-z0-9._~-]+$"
 
 
 _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -49,6 +50,8 @@ _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 _TOOL_TITLES = {
+    "broker_oauth_generate_authorization_url": "Generate Broker OAuth authorization URL",
+    "broker_oauth_exchange_code_for_api_key": "Exchange Broker OAuth code for API key",
     "market_get_symbol_price": "Get symbol price",
     "market_get_depth": "Get order book depth",
     "market_get_klines": "Get candlestick data",
@@ -100,6 +103,14 @@ _TOOL_TITLES = {
 
 
 _FIELD_DESCRIPTIONS = {
+    "client_id": "WEEX Broker client identifier registered for the merchant.",
+    "client_secret": "WEEX Broker client secret used only to sign the token exchange request.",
+    "redirect_uri": "Registered OAuth callback URI; the token exchange must use the exact authorization value.",
+    "oauth_security": "Complete caller-supplied OAuth state and PKCE group; omit the whole object for MCP generation.",
+    "state": "Per-authorization anti-CSRF state value managed and later verified by the merchant.",
+    "code_verifier": "PKCE verifier retained by the merchant and submitted during token exchange.",
+    "code_challenge": "Base64URL-encoded SHA-256 digest of the PKCE code_verifier, without padding.",
+    "code": "Authorization code returned to the merchant callback by WEEX.",
     "market": "WEEX market family: spot or futures.",
     "trading_mode": "Account or trading environment: live or demo.",
     "symbol": "Instrument symbol in the WEEX catalog, for example BTCUSDT.",
@@ -231,6 +242,7 @@ class ToolDefinition:
     title: str = ""
     output_schema: dict[str, Any] | None = None
     annotations: dict[str, bool] | None = None
+    allow_sensitive_success: bool = False
 
     def to_mcp_tool(self) -> dict[str, Any]:
         return {
@@ -259,6 +271,58 @@ class ToolRegistry:
 
 
 def build_default_registry() -> ToolRegistry:
+    oauth_security_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["state", "code_verifier", "code_challenge"],
+        "properties": {
+            "state": {
+                "type": "string",
+                "minLength": 22,
+                "maxLength": 128,
+                "pattern": _OAUTH_SAFE_STRING_PATTERN,
+            },
+            "code_verifier": {
+                "type": "string",
+                "minLength": 43,
+                "maxLength": 128,
+                "pattern": _OAUTH_SAFE_STRING_PATTERN,
+            },
+            "code_challenge": {
+                "type": "string",
+                "minLength": 43,
+                "maxLength": 128,
+                "pattern": _OAUTH_SAFE_STRING_PATTERN,
+            },
+        },
+    }
+    broker_oauth_authorization_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["client_id", "redirect_uri"],
+        "properties": {
+            "client_id": {"type": "string", "minLength": 1},
+            "redirect_uri": {"type": "string", "minLength": 1},
+            "oauth_security": oauth_security_schema,
+        },
+    }
+    broker_oauth_exchange_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["client_id", "client_secret", "redirect_uri", "code", "code_verifier"],
+        "properties": {
+            "client_id": {"type": "string", "minLength": 1},
+            "client_secret": {"type": "string", "minLength": 1},
+            "redirect_uri": {"type": "string", "minLength": 1},
+            "code": {"type": "string", "minLength": 1},
+            "code_verifier": {
+                "type": "string",
+                "minLength": 43,
+                "maxLength": 128,
+                "pattern": _OAUTH_SAFE_STRING_PATTERN,
+            },
+        },
+    }
     market_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
@@ -1109,6 +1173,8 @@ def build_default_registry() -> ToolRegistry:
     trade_position_margin_confirm_schema = _confirmation_schema(trade_position_margin_preview_schema, confirmation_schema)
     trade_auto_append_margin_confirm_schema = _confirmation_schema(trade_auto_append_margin_preview_schema, confirmation_schema)
     for schema in (
+        broker_oauth_authorization_schema,
+        broker_oauth_exchange_schema,
         market_schema,
         market_depth_schema,
         market_klines_schema,
@@ -1159,6 +1225,34 @@ def build_default_registry() -> ToolRegistry:
         _add_field_descriptions(schema)
     return ToolRegistry(
         [
+            ToolDefinition(
+                name="broker_oauth_generate_authorization_url",
+                module="broker",
+                permission="NONE",
+                description="Generate a stateless WEEX Broker OAuth authorization URL and complete PKCE values.",
+                input_schema=broker_oauth_authorization_schema,
+                annotations={
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": False,
+                    "openWorldHint": True,
+                },
+                allow_sensitive_success=True,
+            ),
+            ToolDefinition(
+                name="broker_oauth_exchange_code_for_api_key",
+                module="broker",
+                permission="CREATE_API_KEY",
+                description="Exchange a WEEX Broker OAuth authorization code and create the user's API key.",
+                input_schema=broker_oauth_exchange_schema,
+                annotations={
+                    "readOnlyHint": False,
+                    "destructiveHint": True,
+                    "idempotentHint": False,
+                    "openWorldHint": True,
+                },
+                allow_sensitive_success=True,
+            ),
             ToolDefinition(
                 name="market_get_symbol_price",
                 module="market",

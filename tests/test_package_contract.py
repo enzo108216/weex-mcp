@@ -332,7 +332,7 @@ class PackageContractTests(unittest.TestCase):
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual(len(responses), 2)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 21)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 23)
         self.assertFalse(
             any(tool["name"].startswith("trade_") for tool in responses[1]["result"]["tools"])
         )

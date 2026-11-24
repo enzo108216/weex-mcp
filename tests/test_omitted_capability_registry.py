@@ -11,6 +11,11 @@ MARKET_NEW = {
     "market_get_catalog",
 }
 
+BROKER_NEW = {
+    "broker_oauth_generate_authorization_url",
+    "broker_oauth_exchange_code_for_api_key",
+}
+
 ACCOUNT_NEW = {
     "account_get_config",
     "account_get_commission_rate",
@@ -57,10 +62,11 @@ class OmittedCapabilityRegistryTests(unittest.TestCase):
 
         return {tool["name"]: tool for tool in build_default_registry().list_tools()}
 
-    def test_registry_has_exact_47_target_tools(self):
+    def test_registry_has_exact_49_target_tools(self):
         tools = self._tools()
 
-        self.assertEqual(len(tools), 47)
+        self.assertEqual(len(tools), 49)
+        self.assertTrue(BROKER_NEW.issubset(tools))
         self.assertTrue(MARKET_NEW.issubset(tools))
         self.assertTrue(ACCOUNT_NEW.issubset(tools))
         self.assertTrue(TRADE_NEW.issubset(tools))
@@ -68,7 +74,7 @@ class OmittedCapabilityRegistryTests(unittest.TestCase):
     def test_every_new_schema_is_valid_draft_2020_12_and_strict(self):
         from jsonschema import Draft202012Validator
 
-        for name in MARKET_NEW | ACCOUNT_NEW | TRADE_NEW:
+        for name in BROKER_NEW | MARKET_NEW | ACCOUNT_NEW | TRADE_NEW:
             with self.subTest(name=name):
                 schema = self._tools()[name]["inputSchema"]
                 Draft202012Validator.check_schema(schema)

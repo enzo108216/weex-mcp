@@ -8,9 +8,9 @@ This package supports two runtime modes:
 - Cloud mode: install the `server` extra and start `weex-mcp serve`. Cloud mode
   validates required shared secrets before opening a listening socket.
 
-Neither mode stores API credentials, preview state, idempotency results, or
-user sessions. Account and Trade credentials are sent in the individual MCP
-request body and used only for that request.
+Neither mode stores API credentials, OAuth state, preview state, idempotency
+results, or user sessions. Account and Trade credentials and Broker OAuth
+client values are supplied per MCP request and used only for that request.
 
 ## Required cloud configuration
 
@@ -28,11 +28,11 @@ request body and used only for that request.
 | `WEEX_MARKET_TIMEOUT_SECONDS` | No | `5` | Positive finite public Market upstream timeout. |
 | `WEEX_MARKET_MAX_ATTEMPTS` | No | `3` | Positive attempt count for idempotent public Market GET requests. |
 | `WEEX_MARKET_RETRY_BASE_DELAY_SECONDS` | No | `0.1` | Non-negative finite base delay for exponential Market GET retry backoff. |
-| `WEEX_ACCOUNT_TIMEOUT_SECONDS` | No | `5` | Positive finite Account/Trade upstream timeout. |
+| `WEEX_ACCOUNT_TIMEOUT_SECONDS` | No | `5` | Positive finite Account/Trade/Broker upstream timeout. |
 | `WEEX_SPOT_BASE_URL` | No | `https://api-spot.weex.com` | Deployment-selected Spot HTTPS origin. Paths, credentials, query strings, and fragments are rejected. |
 | `WEEX_FUTURES_BASE_URL` | No | `https://api-contract.weex.com` | Deployment-selected Futures HTTPS origin with the same origin-only validation. |
 | `WEEX_SERVER_NAME` | No | `weex-mcp` | Non-empty service name exposed by health endpoints. |
-| `WEEX_AUDIT_LOG_FILE` | No | empty; Compose default: `/var/log/weex-mcp/weex_mcp_audit.log` | Optional local JSONL audit file for redacted Account/Trade tool events. |
+| `WEEX_AUDIT_LOG_FILE` | No | empty; Compose default: `/var/log/weex-mcp/weex_mcp_audit.log` | Optional local JSONL audit file for redacted Account/Broker/Trade tool events. |
 
 Do not put either required secret in an image, repository, URL, or command-line
 argument. Inject them through the deployment platform's secret mechanism.
@@ -138,7 +138,9 @@ eras:
 - modern `2026-07-28`: the configured protocol header, matching `_meta`,
   `Mcp-Method`, and `Mcp-Name` for named calls are mandatory;
 - a plaintext credential object in each Account/Trade tool call when that tool
-  needs WEEX authentication.
+  needs WEEX authentication;
+- per-request Broker OAuth values for the two Broker tools. The service does
+  not bind or persist merchant clients, state, tokens, or generated API keys.
 
 When Trade is enabled, every valid preview and confirm performs a signed
 read-only permission probe before an approval token can be issued or a write
@@ -154,15 +156,17 @@ JSON-RPC `-32020 HeaderMismatch`. No protocol choice is saved across HTTP
 requests, and the server does not issue a user session.
 
 TLS must terminate before the request reaches an untrusted network. Disable
-request-body capture in reverse proxies, APM agents, tracing middleware, error
-reporters, and access-log customizations because the body can contain
-`api_key`, `api_secret`, and `api_passphrase`. The built-in Uvicorn access log
-does not log bodies, but surrounding infrastructure must be checked separately.
+request and response body capture in reverse proxies, APM agents, tracing
+middleware, error reporters, and access-log customizations. Requests can
+contain `client_secret`, authorization codes, PKCE verifiers, API keys, secrets,
+and passphrases; successful Broker responses intentionally contain a verifier
+or newly created API credential. The built-in Uvicorn access log does not log
+bodies, but surrounding infrastructure must be checked separately.
 
 If `WEEX_AUDIT_LOG_FILE` is set, the service appends one redacted JSON object
-per Account/Trade tool call to that file. The default Compose configuration
-sets it to `/var/log/weex-mcp/weex_mcp_audit.log` and mounts `./logs` from the
-host, so the host file is `logs/weex_mcp_audit.log`. Raw credential values are
+per Account/Broker/Trade tool call to that file. The default Compose
+configuration sets it to `/var/log/weex-mcp/weex_mcp_audit.log` and mounts
+`./logs` from the host, so the host file is `logs/weex_mcp_audit.log`. Raw credential values are
 redacted before writing; retain, rotate, and protect the mounted `logs`
 directory according to the deployment's audit policy.
 
@@ -181,9 +185,12 @@ but is not an unbounded workload queue.
 Only public, idempotent Market GET transport failures (`TimeoutError` and
 non-HTTP URL transport errors) receive bounded exponential-backoff retries.
 HTTP responses, WEEX business errors, invalid JSON, malformed response shapes,
-Account calls, Trade permission probes, and all private/write calls are never
-automatically retried by the MCP. In particular, an unknown Trade write result
-must be reconciled by client order ID before any new write is considered.
+Account calls, Broker token/API-key calls, Trade permission probes, and all
+private/write calls are never automatically retried by the MCP. In particular,
+an unknown Trade write result must be reconciled by client order ID before any
+new write is considered. An unknown Broker `create-api` result must not be
+retried because the API key may already exist and its secret is returned only
+once.
 
 This version accepts one approval-token secret at a time. Rotating it
 immediately invalidates outstanding tokens. Coordinate the switch across all

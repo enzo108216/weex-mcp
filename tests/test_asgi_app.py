@@ -598,6 +598,54 @@ class AsgiAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("tools", json.loads(body)["result"])
 
+    def test_modern_http_broker_oauth_success_returns_only_approved_sensitive_output(self):
+        from weex_mcp.asgi_app import build_asgi_app
+        from weex_mcp.service import build_default_service
+
+        class BrokerAdapter:
+            def generate_authorization_url(self, **kwargs):
+                raise AssertionError("unexpected generate call")
+
+            def exchange_code_for_api_key(self, **kwargs):
+                return {
+                    "api_key": "AK_MODERN",
+                    "api_secret": "SK_MODERN",
+                    "api_passphrase": "PP_MODERN",
+                }
+
+        name = "broker_oauth_exchange_code_for_api_key"
+        body = self._modern_body(
+            request_id="broker-modern",
+            method="tools/call",
+            params={
+                "name": name,
+                "arguments": {
+                    "client_id": "client",
+                    "client_secret": "CLIENT_SECRET_INPUT",
+                    "redirect_uri": "https://merchant.example.com/callback",
+                    "code": "AUTHORIZATION_CODE_INPUT",
+                    "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+                },
+            },
+        )
+        status, response_body, _sent = asyncio.run(
+            call_asgi(
+                build_asgi_app(service=build_default_service(broker_oauth_adapter=BrokerAdapter())),
+                body=body,
+                headers=self._context_headers()
+                + [(b"mcp-method", b"tools/call"), (b"mcp-name", name.encode("ascii"))],
+                modern=False,
+            )
+        )
+
+        payload = json.loads(response_body)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status, 200)
+        for expected in ("AK_MODERN", "SK_MODERN", "PP_MODERN"):
+            self.assertIn(expected, serialized)
+        for forbidden in ("CLIENT_SECRET_INPUT", "AUTHORIZATION_CODE_INPUT"):
+            self.assertNotIn(forbidden, serialized)
+
     def test_asgi_reuses_injected_service_settings_when_settings_argument_is_omitted(self):
         from weex_mcp.asgi_app import build_asgi_app
         from weex_mcp.service import build_default_service

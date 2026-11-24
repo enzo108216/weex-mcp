@@ -128,7 +128,9 @@ class McpServiceTests(unittest.TestCase):
         )
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(names), 21)
+        self.assertEqual(len(names), 23)
+        self.assertIn("broker_oauth_generate_authorization_url", names)
+        self.assertIn("broker_oauth_exchange_code_for_api_key", names)
         self.assertIn("market_get_symbol_price", names)
         self.assertIn("account_get_balance", names)
         self.assertFalse(any(name.startswith("trade_") for name in names))
@@ -141,7 +143,7 @@ class McpServiceTests(unittest.TestCase):
         )
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(names), 47)
+        self.assertEqual(len(names), 49)
         self.assertEqual(sum(name.startswith("trade_") for name in names), 26)
 
     def test_market_tool_can_run_without_credential(self):

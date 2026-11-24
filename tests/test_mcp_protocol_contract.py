@@ -147,7 +147,7 @@ class McpProtocolContractTests(unittest.TestCase):
                     protocol_version=version,
                 )
 
-                self.assertEqual(len(listed["result"]["tools"]), 21)
+                self.assertEqual(len(listed["result"]["tools"]), 23)
                 self.assertFalse(
                     any(tool["name"].startswith("trade_") for tool in listed["result"]["tools"])
                 )

@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .adapters.account import AccountAdapter, WeexAccountRestAdapter
+from .adapters.broker_oauth import BrokerOAuthAdapter, WeexBrokerOAuthAdapter
 from .adapters.market import MarketPriceAdapter, WeexMarketRestAdapter
 from .adapters.trade_guard import FailClosedTradeAdapter, TradeGuardAdapter
 from .adapters.trade_rest import WeexTradeRestAdapter
@@ -30,6 +31,7 @@ from .tools.account import (
     get_trades,
     get_transfer_records,
 )
+from .tools.broker_oauth import exchange_code_for_api_key, generate_authorization_url
 from .tools.market import (
     get_advanced_klines,
     get_book_ticker,
@@ -67,6 +69,7 @@ class McpService:
         registry: ToolRegistry,
         approval_codec: ApprovalTokenCodec,
         market_adapter: MarketPriceAdapter,
+        broker_oauth_adapter: BrokerOAuthAdapter,
         account_adapter: AccountAdapter,
         trade_adapter: TradeGuardAdapter,
         audit_sink: AuditSink,
@@ -75,6 +78,7 @@ class McpService:
         self.registry = registry
         self.approval_codec = approval_codec
         self.market_adapter = market_adapter
+        self.broker_oauth_adapter = broker_oauth_adapter
         self.account_adapter = account_adapter
         self.trade_adapter = trade_adapter
         self.audit_sink = audit_sink
@@ -122,7 +126,7 @@ class McpService:
                 {
                     "supportedVersions": [self.settings.protocol_version],
                     "capabilities": {"tools": {"listChanged": False}},
-                    "instructions": "WEEX local MCP tools for public market data, read-only account queries, and stateless preview/confirm trading.",
+                    "instructions": "WEEX local MCP tools for Broker OAuth, public market data, read-only account queries, and stateless preview/confirm trading.",
                     "cacheScope": "public",
                     "ttlMs": 300_000,
                     "_meta": {
@@ -145,7 +149,7 @@ class McpService:
                             "name": self.settings.server_name,
                             "version": self.settings.server_version,
                         },
-                        "instructions": "WEEX MCP tools for public market data, read-only account queries, and stateless preview/confirm trading.",
+                        "instructions": "WEEX MCP tools for Broker OAuth, public market data, read-only account queries, and stateless preview/confirm trading.",
                     },
                     protocol_version=active_protocol_version,
                 )
@@ -178,10 +182,16 @@ class McpService:
             if not isinstance(name, str) or not self.registry.has_tool(name):
                 return jsonrpc_error(request_id, -32602, "Unknown tool.")
             active_context = context or TenantContext(tenant_id="mcp", user_id="anonymous", session_id="request")
+            tool = self.registry.get_tool(name)
+            payload = self._call_tool(params, context=active_context)
+            allow_sensitive_success = bool(
+                tool is not None and tool.allow_sensitive_success and payload.get("ok") is True
+            )
             return self._jsonrpc_result(
                 request_id,
-                mcp_call_tool_result(self._call_tool(params, context=active_context)),
+                mcp_call_tool_result(payload, redact=not allow_sensitive_success),
                 protocol_version=active_protocol_version,
+                redact=not allow_sensitive_success,
             )
         return jsonrpc_error(request_id, -32601, f"Unsupported method: {method}")
 
@@ -241,6 +251,10 @@ class McpService:
         return self._finish_tool(tool, arguments, context, result)
 
     def _dispatch_tool(self, name: str, arguments: dict[str, Any], context: TenantContext | None) -> dict[str, Any]:
+        if name == "broker_oauth_generate_authorization_url":
+            return generate_authorization_url(arguments, adapter=self.broker_oauth_adapter)
+        if name == "broker_oauth_exchange_code_for_api_key":
+            return exchange_code_for_api_key(arguments, adapter=self.broker_oauth_adapter)
         if name == "market_get_symbol_price":
             return get_symbol_price(arguments, adapter=self.market_adapter)
         if name == "market_get_depth":
@@ -328,7 +342,7 @@ class McpService:
         return error_response("unknown_tool", "Unknown tool.")
 
     def _finish_tool(self, tool: ToolDefinition, arguments: dict[str, Any], context: TenantContext | None, result: dict[str, Any]) -> dict[str, Any]:
-        if tool.module not in {"account", "trade"}:
+        if tool.module not in {"account", "broker", "trade"}:
             return result
         event: dict[str, Any] = {
             "tool_name": tool.name,
@@ -357,6 +371,7 @@ def build_default_service(
     settings: Settings | None = None,
     trade_enabled: bool | None = None,
     market_adapter: MarketPriceAdapter | None = None,
+    broker_oauth_adapter: BrokerOAuthAdapter | None = None,
     account_adapter: AccountAdapter | None = None,
     secret_provider: SecretProvider | None = None,
     trade_adapter: TradeGuardAdapter | None = None,
@@ -404,6 +419,8 @@ def build_default_service(
             ttl_seconds=settings.approval_token_ttl_seconds,
         ),
         market_adapter=active_market_adapter,
+        broker_oauth_adapter=broker_oauth_adapter
+        or WeexBrokerOAuthAdapter(timeout_seconds=settings.account_timeout_seconds),
         account_adapter=account_adapter
         or WeexAccountRestAdapter(
             secret_provider=active_secret_provider,

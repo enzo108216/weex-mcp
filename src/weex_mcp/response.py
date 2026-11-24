@@ -12,6 +12,18 @@ def ok_response(**fields: Any) -> dict[str, Any]:
     return redact_secrets(result)
 
 
+def sensitive_ok_response(**fields: Any) -> dict[str, Any]:
+    """Build an intentionally unredacted success payload for allowlisted tools.
+
+    The service must still opt the tool definition into sensitive success
+    output. Errors and all other tools continue through the default redactor.
+    """
+
+    result: dict[str, Any] = {"ok": True}
+    result.update(fields)
+    return result
+
+
 def error_response(
     code: str,
     message: str,
@@ -44,8 +56,8 @@ def jsonrpc_error(request_id: Any, code: int, message: str, *, data: Any | None 
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
-def mcp_call_tool_result(payload: dict[str, Any]) -> dict[str, Any]:
-    safe_payload = redact_secrets(payload)
+def mcp_call_tool_result(payload: dict[str, Any], *, redact: bool = True) -> dict[str, Any]:
+    safe_payload = redact_secrets(payload) if redact else payload
     result = dict(safe_payload)
     result["structuredContent"] = safe_payload
     result["content"] = [{"type": "text", "text": json.dumps(safe_payload, ensure_ascii=False, sort_keys=True)}]

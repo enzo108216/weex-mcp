@@ -165,6 +165,24 @@ class CredentialContextTests(unittest.TestCase):
             self.assertNotIn(forbidden, serialized)
         self.assertEqual(redacted["api_key"], "[REDACTED]")
 
+    def test_redaction_covers_oauth_sensitive_fields_in_snake_and_camel_case(self):
+        from weex_mcp.audit import redact_secrets
+
+        payload = redact_secrets(
+            {
+                "access_token": "ACCESS_SNAKE",
+                "accessToken": "ACCESS_CAMEL",
+                "refresh_token": "REFRESH_SNAKE",
+                "refreshToken": "REFRESH_CAMEL",
+                "code_verifier": "VERIFIER_SNAKE",
+                "codeVerifier": "VERIFIER_CAMEL",
+                "authorization_code": "CODE_SNAKE",
+                "authorizationCode": "CODE_CAMEL",
+            }
+        )
+
+        self.assertTrue(all(value == "[REDACTED]" for value in payload.values()))
+
     def test_file_audit_sink_appends_jsonl_without_exposing_secrets(self):
         from weex_mcp.audit import FileAuditSink
 

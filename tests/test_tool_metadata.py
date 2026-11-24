@@ -6,7 +6,7 @@ class ToolMetadataContractTests(unittest.TestCase):
         from weex_mcp.tool_registry import build_default_registry
 
         tools = build_default_registry().list_tools()
-        self.assertEqual(len(tools), 47)
+        self.assertEqual(len(tools), 49)
         for tool in tools:
             with self.subTest(tool=tool["name"]):
                 self.assertIsInstance(tool.get("title"), str)

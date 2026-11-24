@@ -19,6 +19,7 @@ are provided for the standalone ASGI server and development verification.
 - [Protocol compatibility](#protocol-compatibility)
 - [Tool catalog](#tool-catalog)
 - [Credential handling](#credential-handling)
+- [Broker OAuth](#broker-oauth)
 - [Trade authorization model](#trade-authorization-model)
 - [Project layout](#project-layout)
 - [Development and verification](#development-and-verification)
@@ -28,8 +29,9 @@ are provided for the standalone ASGI server and development verification.
 
 ## Capabilities
 
-- 47 typed tools covering public Market data, read-only Account data, and
-  guarded Trade operations (11 Market, 10 Account, and 26 Trade tools).
+- 49 typed tools covering Broker OAuth, public Market data, read-only Account
+  data, and guarded Trade operations (2 Broker, 11 Market, 10 Account, and 26
+  Trade tools).
 - Local stdio transport for MCP client integration.
 - Embeddable service and ASGI application factories for host applications.
 - Standalone Streamable HTTP deployment through Uvicorn.
@@ -45,7 +47,7 @@ service does not persist API credentials, approval state, idempotency results,
 or user sessions.
 When Trade is disabled, its 26 tools are omitted from `tools/list`; direct
 calls still fail closed with `module_disabled`. Explicit enablement exposes the
-full 47-tool catalog.
+full 49-tool catalog.
 
 ## Installation
 
@@ -257,6 +259,7 @@ modes reached through `initialize`, not additional current discovery targets.
 
 | Module | Tools | Access model |
 | --- | --- | --- |
+| Broker (2) | `broker_oauth_generate_authorization_url`, `broker_oauth_exchange_code_for_api_key` | Stateless merchant-supplied OAuth context; successful responses intentionally contain sensitive values |
 | Market (11) | `market_get_symbol_price`, `market_get_depth`, `market_get_klines`, `market_get_exchange_info`, `market_get_ticker_24h`, `market_get_book_ticker`, `market_get_recent_trades`, `market_get_funding_rate`, `market_get_open_interest`, `market_get_advanced_klines`, `market_get_catalog` | Public market data |
 | Account (10) | `account_get_balance`, `account_get_positions`, `account_get_orders`, `account_get_trades`, `account_get_bills`, `account_get_config`, `account_get_commission_rate`, `account_get_symbol_config`, `account_get_conditional_orders`, `account_get_transfer_records` | Request-scoped `USER_DATA` credential |
 | Trade (26) | Existing order/cancel/leverage/margin-mode pairs plus `batch_order`, `batch_cancel`, `cancel_scope`, `conditional_order`, `conditional_cancel`, `tp_sl`, `close_positions`, `position_margin`, and `auto_append_margin` preview/confirm pairs | Explicit enablement and two-phase confirmation |
@@ -280,13 +283,15 @@ credential = {
 ```
 
 Plaintext credentials are resolved in memory for the current request only.
-Credential values are excluded from responses and audit records. Credentials
-must not be placed in URLs or query parameters. HTTP deployments must use TLS
-and must disable request-body capture in proxies, application monitoring,
-tracing, and error-reporting systems.
+Credential values are excluded from ordinary tool responses and all audit
+records. The Broker OAuth exchange success response is the deliberate exception:
+it returns the newly created credential once so the merchant can store it.
+Credentials must not be placed in URLs or query parameters. HTTP deployments
+must use TLS and must disable request and response body capture in proxies,
+application monitoring, tracing, and error-reporting systems.
 
 When `WEEX_AUDIT_LOG_FILE` is set, the default service appends local audit
-records as JSON Lines. Each line is one redacted account or trade tool event
+records as JSON Lines. Each line is one redacted Account, Broker, or Trade tool event
 with fields such as tool name, module, success status, request identity, and
 credential fingerprint; raw API keys, secrets, passphrases, and credential refs
 are not written. The Docker Compose configuration sets this variable to
@@ -298,6 +303,30 @@ written by the MCP to a file.
 The `credential_ref` and `encrypted_envelope` forms remain extension points
 for hosts that provide a compatible secret resolver. Tenant, user, and session
 headers are optional; absent values resolve to an anonymous internal context.
+
+## Broker OAuth
+
+Broker OAuth is stateless in this package. The merchant stores the returned
+`state` and `code_verifier`, receives the browser callback, validates `state`,
+and persists the final API credential. The MCP stores none of those values.
+
+Generate an authorization URL by passing `client_id`, `redirect_uri`, and
+optionally a complete `oauth_security` object containing `state`,
+`code_verifier`, and the matching S256 `code_challenge`. If the object is
+omitted, the tool generates and returns the complete group.
+
+After the merchant validates the callback state, call
+`broker_oauth_exchange_code_for_api_key` with `client_id`, `client_secret`, the
+same `redirect_uri`, the callback `code`, and the original `code_verifier`.
+The tool signs the token request, immediately calls `create-api`, and returns a
+`plaintext` credential compatible with the Account and Trade tools. It does not
+return or retain access/refresh tokens. API-key creation is never automatically
+retried; `api_key_creation_result_unknown` requires manual investigation.
+
+Both successful Broker responses intentionally contain sensitive data: the
+first contains the PKCE verifier and the second contains the API key, secret,
+and passphrase. Do not invoke these tools through infrastructure that records
+MCP request or response bodies.
 
 ## Trade authorization model
 
@@ -402,6 +431,8 @@ local logs are ignored. Do not commit real service secrets or WEEX credentials.
   replicas must share one configured secret. Rotation invalidates old tokens.
 - A Trade result is unknown after a timeout: do not blindly retry. Reconcile by
   the stable `client_order_id` through a read-only query before any new write.
+- A Broker OAuth API-key result is unknown: do not retry `create-api`; the key
+  may already be bound and its one-time secret response may be unrecoverable.
 - Container readiness fails: run `docker compose config`, inspect `/readyz`, and
   confirm that the container and published port settings match.
 
@@ -418,9 +449,9 @@ authorization to submit new trade requests.
 The package provides MCP protocol handling, strict configuration validation,
 request-scoped credential resolution, WEEX REST adapters, health endpoints,
 and a container entry point. External infrastructure remains responsible for
-TLS termination, secret distribution, gateway policy, request-body log
-suppression, monitoring, alerting, rate limiting, deployment rollout, and
-reconciliation of unknown trade outcomes. The service intentionally does not
+TLS termination, secret distribution, gateway policy, request/response body
+log suppression, monitoring, alerting, rate limiting, deployment rollout, and
+reconciliation of unknown outcomes. The service intentionally does not
 implement built-in rate limiting.
 
 ## License
