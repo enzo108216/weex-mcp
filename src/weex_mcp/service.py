@@ -581,6 +581,8 @@ def build_default_service(
         active_partner_adapter = WeexPartnerRestAdapter(
             secret_provider=active_secret_provider,
             base_url=settings.spot_base_url,
+            timeout_seconds=settings.partner_timeout_seconds,
+            locale=settings.request_locale,
         )
 
     return McpService(

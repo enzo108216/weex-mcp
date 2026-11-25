@@ -245,6 +245,7 @@ class WeexPartnerRestAdapter:
         secret_provider: SecretProvider,
         base_url: str = PARTNER_BASE_URL,
         timeout_seconds: float = PARTNER_TIMEOUT_SECONDS,
+        locale: str = "en-US",
         transport: PreparedTransport | None = None,
         time_func: Callable[[], float] | None = None,
     ) -> None:
@@ -256,8 +257,11 @@ class WeexPartnerRestAdapter:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be a positive number.")
+        if not isinstance(locale, str) or not locale:
+            raise ValueError("locale must be a non-empty string.")
         self.secret_provider = secret_provider
         self.timeout_seconds = float(timeout_seconds)
+        self.locale = locale
         self.transport = transport or _default_transport
         self.time_func = time_func or time.time
 
@@ -483,7 +487,7 @@ class WeexPartnerRestAdapter:
             "headers": {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "locale": "en-US",
+                "locale": self.locale,
                 "User-Agent": "weex-mcp/0.1 partner-readonly",
                 "ACCESS-KEY": credential.api_key,
                 "ACCESS-PASSPHRASE": credential.api_passphrase,
@@ -545,6 +549,7 @@ class WeexPartnerRestAdapter:
             "method": endpoint.method,
             "path": endpoint.path,
             "weight": endpoint.weight,
+            "http_status": status,
             "rate_limit": rate_limit,
             "retry": {"automatic": False},
             "environment": self.environment,

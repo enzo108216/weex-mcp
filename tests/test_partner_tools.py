@@ -476,6 +476,8 @@ class PartnerToolTests(unittest.TestCase):
         constructor.assert_called_once_with(
             secret_provider=provider,
             base_url="https://partner-fixture.weex.tech",
+            timeout_seconds=30.0,
+            locale="en-US",
         )
         self.assertIs(partner_service.partner_adapter, configured_adapter)
 

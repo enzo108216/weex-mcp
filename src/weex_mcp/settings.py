@@ -34,6 +34,7 @@ class Settings:
     market_max_attempts: int = 3
     market_retry_base_delay_seconds: float = 0.1
     account_timeout_seconds: float = 5.0
+    partner_timeout_seconds: float = 30.0
     request_locale: str = "en-US"
     spot_base_url: str = SPOT_BASE_URL
     futures_base_url: str = FUTURES_BASE_URL
@@ -64,6 +65,7 @@ class Settings:
             "market_retry_base_delay_seconds",
         )
         _validate_positive_number(self.account_timeout_seconds, "account_timeout_seconds")
+        _validate_positive_number(self.partner_timeout_seconds, "partner_timeout_seconds")
         object.__setattr__(
             self,
             "request_locale",
@@ -155,6 +157,11 @@ class Settings:
                 source,
                 "WEEX_ACCOUNT_TIMEOUT_SECONDS",
                 defaults.account_timeout_seconds,
+            ),
+            partner_timeout_seconds=_parse_positive_float(
+                source,
+                "WEEX_PARTNER_TIMEOUT_SECONDS",
+                defaults.partner_timeout_seconds,
             ),
             request_locale=source.get("WEEX_LOCALE", "").strip() or defaults.request_locale,
             spot_base_url=_normalize_https_origin(
