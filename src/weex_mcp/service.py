@@ -556,6 +556,7 @@ def build_default_service(
                 spot_base_url=settings.spot_base_url,
                 futures_base_url=settings.futures_base_url,
                 timeout_seconds=settings.account_timeout_seconds,
+                locale=settings.request_locale,
                 market_adapter=active_market_adapter,
             )
         else:

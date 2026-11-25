@@ -1175,7 +1175,10 @@ class TradeRestCompleteTests(unittest.TestCase):
             "headers": {},
         }
 
-        with patch("weex_mcp.adapters.trade_rest.urlopen", side_effect=http_error):
+        with patch(
+            "weex_mcp.adapters.trade_rest._NO_REDIRECT_OPENER.open",
+            side_effect=http_error,
+        ):
             with self.assertRaises(WeexRestBusinessError) as context:
                 _default_transport(prepared, 5.0)
 
@@ -1199,7 +1202,10 @@ class TradeRestCompleteTests(unittest.TestCase):
             "headers": {},
         }
 
-        with patch("weex_mcp.adapters.trade_rest.urlopen", side_effect=http_error):
+        with patch(
+            "weex_mcp.adapters.trade_rest._NO_REDIRECT_OPENER.open",
+            side_effect=http_error,
+        ):
             with self.assertRaises(WeexRestBusinessError) as context:
                 _default_transport(prepared, 5.0)
 

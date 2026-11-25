@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..secret_provider import ResolvedWeexCredential, SecretProvider, SecretProviderError
 from ..tenant_context import TenantContext
@@ -59,6 +59,22 @@ FUTURES_HTTP_200_SUCCESS_PATHS = {
 PreparedTransport = Callable[[dict[str, Any], float], bytes]
 
 
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
 class WeexTradeRestAdapter:
     """Signed WEEX trade adapter for spot and futures order operations.
 
@@ -74,6 +90,7 @@ class WeexTradeRestAdapter:
         spot_base_url: str = SPOT_BASE_URL,
         futures_base_url: str = FUTURES_BASE_URL,
         timeout_seconds: float = 5.0,
+        locale: str = "en-US",
         transport: PreparedTransport | None = None,
         time_func: Callable[[], float] | None = None,
         market_adapter: MarketPriceAdapter | None = None,
@@ -82,12 +99,14 @@ class WeexTradeRestAdapter:
         self.spot_base_url = spot_base_url.rstrip("/")
         self.futures_base_url = futures_base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.locale = locale
         self.transport = transport or _default_transport
         self.time_func = time_func or time.time
         self.market_adapter = market_adapter or WeexMarketRestAdapter(
             spot_base_url=self.spot_base_url,
             futures_base_url=self.futures_base_url,
             timeout_seconds=timeout_seconds,
+            locale=locale,
         )
 
     def preview_order(
@@ -879,6 +898,7 @@ class WeexTradeRestAdapter:
             api_secret=credential.api_secret,
             api_passphrase=credential.api_passphrase,
             timestamp_ms=str(int(self.time_func() * 1000)),
+            locale=self.locale,
         )
         if mutation_action is not None:
             prepared["_mutation_action"] = mutation_action
@@ -2022,7 +2042,7 @@ def _batch_response_identifier(item: dict[str, Any], *, identity_kind: str) -> s
     return _optional_str(item.get("clientOrderId") or item.get("origClientOrderId"))
 
 
-def _prepare_signed_request(*, base_url: str, method: str, path: str, query: dict[str, str], body: dict[str, Any], api_key: str, api_secret: str, api_passphrase: str, timestamp_ms: str) -> dict[str, Any]:
+def _prepare_signed_request(*, base_url: str, method: str, path: str, query: dict[str, str], body: dict[str, Any], api_key: str, api_secret: str, api_passphrase: str, timestamp_ms: str, locale: str) -> dict[str, Any]:
     query_string = urlencode(query)
     body_str = _compact_json(body)
     signature = _sign(api_secret=api_secret, timestamp_ms=timestamp_ms, method=method, path=path, query_string=query_string, body=body_str)
@@ -2033,7 +2053,7 @@ def _prepare_signed_request(*, base_url: str, method: str, path: str, query: dic
         "headers": {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "locale": "en-US",
+            "locale": locale,
             "User-Agent": "weex-mcp/0.1 trade",
             "ACCESS-KEY": api_key,
             "ACCESS-PASSPHRASE": api_passphrase,
@@ -2055,7 +2075,7 @@ def _sign(*, api_secret: str, timestamp_ms: str, method: str, path: str, query_s
 def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> bytes:
     request = Request(url=prepared["url"], method=prepared["method"], data=prepared["data"], headers=prepared["headers"])
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout_seconds) as response:
             return response.read()
     except HTTPError as exc:
         if prepared.get("_mutation_action"):
