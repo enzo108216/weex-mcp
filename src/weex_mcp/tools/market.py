@@ -128,23 +128,33 @@ def ping(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str,
 
 
 def get_ticker_24h(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    symbol = arguments.get("symbol")
+    symbols = arguments.get("symbols")
+    if symbol not in (None, "") and symbols is not None:
+        return error_response("invalid_arguments", "symbol and symbols are mutually exclusive.")
     return _call_market_with_fields(
         arguments,
         required=("market",),
         call=lambda: adapter.get_ticker_24h(
             market=str(arguments["market"]).lower(),
-            symbol=_optional_symbol(arguments.get("symbol")),
+            symbol=_optional_symbol(symbol),
+            symbols=_normalize_symbols(symbols) if symbols is not None else None,
         ),
     )
 
 
 def get_book_ticker(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    symbol = arguments.get("symbol")
+    symbols = arguments.get("symbols")
+    if symbol not in (None, "") and symbols is not None:
+        return error_response("invalid_arguments", "symbol and symbols are mutually exclusive.")
     return _call_market_with_fields(
         arguments,
         required=("market",),
         call=lambda: adapter.get_book_ticker(
             market=str(arguments["market"]).lower(),
-            symbol=_optional_symbol(arguments.get("symbol")),
+            symbol=_optional_symbol(symbol),
+            symbols=_normalize_symbols(symbols) if symbols is not None else None,
         ),
     )
 

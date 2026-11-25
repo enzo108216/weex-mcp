@@ -8,12 +8,19 @@ import re
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..secret_provider import SecretProvider
 from ..tenant_context import TenantContext
-from .rest_errors import WeexRestBusinessError, raise_for_weex_business_error
+from .rest_errors import (
+    WeexHttpResponse,
+    WeexRestBusinessError,
+    add_http_status,
+    decode_json_transport,
+    raw_rest_payload,
+)
 
 SPOT_BASE_URL = "https://api-spot.weex.com"
 FUTURES_BASE_URL = "https://api-contract.weex.com"
@@ -50,7 +57,23 @@ _FUTURES_TRADE_MAX_RANGE_MS = 7 * _DAY_MS
 _FUTURES_TRADE_MAX_AGE_MS = 365 * _DAY_MS
 _SPOT_TAX_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")
 
-PreparedTransport = Callable[[dict[str, Any], float], bytes]
+PreparedTransport = Callable[[dict[str, Any], float], bytes | WeexHttpResponse]
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
 
 
 class AccountAdapter(Protocol):
@@ -150,6 +173,7 @@ class WeexAccountRestAdapter:
         spot_base_url: str = SPOT_BASE_URL,
         futures_base_url: str = FUTURES_BASE_URL,
         timeout_seconds: float = 5.0,
+        locale: str = "en-US",
         transport: PreparedTransport | None = None,
         time_func: Callable[[], float] | None = None,
     ):
@@ -157,6 +181,7 @@ class WeexAccountRestAdapter:
         self.spot_base_url = spot_base_url.rstrip("/")
         self.futures_base_url = futures_base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.locale = locale
         self.transport = transport or _default_transport
         self.time_func = time_func or time.time
 
@@ -259,15 +284,15 @@ class WeexAccountRestAdapter:
                 message="WEEX single-position response did not match symbol.",
                 payload=payload,
             )
-        return {
+        return add_http_status({
             "market": normalized_market,
             "trading_mode": normalized_mode,
             "symbol": normalized_symbol,
             "positions": positions,
             "source": "weex_private_rest",
             "endpoint": "account.get_single_position",
-            "raw": payload,
-        }
+            "raw": raw_rest_payload(payload),
+        }, payload)
 
     def get_orders(
         self,
@@ -414,13 +439,13 @@ class WeexAccountRestAdapter:
                 message="WEEX account config was missing boolean capability fields.",
                 payload=payload,
             )
-        return {
+        return add_http_status({
             "market": normalized_market,
             "trading_mode": normalized_mode,
             "config": config,
             "source": "weex_private_rest",
-            "raw": payload,
-        }
+            "raw": raw_rest_payload(payload),
+        }, payload)
 
     def get_commission_rate(
         self,
@@ -450,14 +475,14 @@ class WeexAccountRestAdapter:
             rate.get(field) in (None, "") for field in ("makerCommissionRate", "takerCommissionRate")
         ):
             raise WeexRestBusinessError(code="invalid_response", message="WEEX commission-rate response was invalid.", payload=payload)
-        return {
+        return add_http_status({
             "market": normalized_market,
             "trading_mode": normalized_mode,
             "symbol": normalized_symbol,
             "commission_rate": rate,
             "source": "weex_private_rest",
-            "raw": payload,
-        }
+            "raw": raw_rest_payload(payload),
+        }, payload)
 
     def get_symbol_config(
         self,
@@ -490,14 +515,14 @@ class WeexAccountRestAdapter:
             not configs or any(_normalize_upstream_symbol(item["symbol"], payload=payload) != normalized_symbol for item in configs)
         ):
             raise WeexRestBusinessError(code="invalid_response", message="WEEX symbol-config response did not match symbol.", payload=payload)
-        return {
+        return add_http_status({
             "market": normalized_market,
             "trading_mode": normalized_mode,
             "symbol": normalized_symbol,
             "symbol_configs": configs,
             "source": "weex_private_rest",
-            "raw": payload,
-        }
+            "raw": raw_rest_payload(payload),
+        }, payload)
 
     def get_conditional_orders(
         self,
@@ -544,7 +569,8 @@ class WeexAccountRestAdapter:
         payload = self._signed_request(
             market=normalized_market, method="GET", path=path, query=query, body={}, credential=credential
         )
-        data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+        raw_payload = raw_rest_payload(payload)
+        data = raw_payload.get("data") if isinstance(raw_payload, dict) and "data" in raw_payload else raw_payload
         has_more: bool | None = None
         if normalized_status == "history":
             if not isinstance(data, dict) or not isinstance(data.get("orders"), list) or not isinstance(data.get("hasMore"), bool):
@@ -562,11 +588,11 @@ class WeexAccountRestAdapter:
             "status": normalized_status,
             "conditional_orders": orders,
             "source": "weex_private_rest",
-            "raw": payload,
+            "raw": raw_payload,
         }
         if has_more is not None:
             result["has_more"] = has_more
-        return result
+        return add_http_status(result, payload)
 
     def get_transfer_records(
         self,
@@ -606,13 +632,13 @@ class WeexAccountRestAdapter:
             credential=credential,
         )
         records = _extract_object_list_payload(payload, resource="transfer records")
-        return {
+        return add_http_status({
             "market": normalized_market,
             "trading_mode": normalized_mode,
             "transfer_records": records,
             "source": "weex_private_rest",
-            "raw": payload,
-        }
+            "raw": raw_rest_payload(payload),
+        }, payload)
 
     def _signed_request(
         self,
@@ -645,7 +671,7 @@ class WeexAccountRestAdapter:
             "headers": {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "locale": "en-US",
+                "locale": self.locale,
                 "User-Agent": "weex-mcp/0.1 account-readonly",
                 "ACCESS-KEY": credential.api_key,
                 "ACCESS-PASSPHRASE": credential.api_passphrase,
@@ -656,21 +682,25 @@ class WeexAccountRestAdapter:
             "query": query,
             "body": body,
         }
-        raw_bytes = self.transport(prepared, self.timeout_seconds)
-        payload = json.loads(raw_bytes.decode("utf-8"))
-        raise_for_weex_business_error(payload)
-        return payload
+        return decode_json_transport(self.transport(prepared, self.timeout_seconds))
 
 
-def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> bytes:
+def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> WeexHttpResponse:
     request = Request(
         url=prepared["url"],
         method=prepared["method"],
         data=prepared["data"],
         headers=prepared["headers"],
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+    try:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout_seconds) as response:
+            return WeexHttpResponse(status=response.status, body=response.read())
+    except HTTPError as exc:
+        try:
+            body = exc.read()
+        finally:
+            exc.close()
+        return WeexHttpResponse(status=exc.code, body=body)
 
 
 def _sign(*, api_secret: str, timestamp_ms: str, method: str, path: str, query_string: str, body: str) -> str:
@@ -754,7 +784,8 @@ def _bills_path(*, market: str, bill_type: str) -> str:
 
 
 def _normalize_balance_response(*, market: str, trading_mode: str, payload: Any) -> dict[str, Any]:
-    data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+    raw = raw_rest_payload(payload)
+    data = raw.get("data") if isinstance(raw, dict) and "data" in raw else raw
     if isinstance(data, dict) and isinstance(data.get("balances"), list):
         balances = data["balances"]
     elif isinstance(data, list):
@@ -766,24 +797,26 @@ def _normalize_balance_response(*, market: str, trading_mode: str, payload: Any)
             payload=payload,
         )
     _require_object_items(balances, resource="balances", payload=payload)
-    return {
+    return add_http_status({
         "market": market,
         "trading_mode": trading_mode,
         "balances": balances,
         "source": "weex_private_rest",
-        "raw": payload,
-    }
+        "raw": raw,
+    }, payload)
 
 
 def _extract_object_payload(payload: Any, *, resource: str) -> dict[str, Any]:
-    data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+    raw = raw_rest_payload(payload)
+    data = raw.get("data") if isinstance(raw, dict) and "data" in raw else raw
     if not isinstance(data, dict):
         raise WeexRestBusinessError(code="invalid_response", message=f"WEEX {resource} response was not an object.", payload=payload)
     return data
 
 
 def _extract_object_list_payload(payload: Any, *, resource: str) -> list[dict[str, Any]]:
-    data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+    raw = raw_rest_payload(payload)
+    data = raw.get("data") if isinstance(raw, dict) and "data" in raw else raw
     return _require_object_items(data, resource=resource, payload=payload)
 
 
@@ -795,7 +828,8 @@ def _normalize_private_resource(
     payload: Any,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
+    raw = raw_rest_payload(payload)
+    data = raw.get("data") if isinstance(raw, dict) and "data" in raw else raw
     items: Any
     if isinstance(data, dict) and isinstance(data.get(resource), list):
         items = data[resource]
@@ -821,11 +855,11 @@ def _normalize_private_resource(
         "trading_mode": trading_mode,
         resource: items,
         "source": "weex_private_rest",
-        "raw": payload,
+        "raw": raw,
     }
     if extra:
         result.update(extra)
-    return result
+    return add_http_status(result, payload)
 
 
 def _has_single_order_fields(value: dict[str, Any]) -> bool:

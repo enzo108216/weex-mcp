@@ -34,6 +34,7 @@ class Settings:
     market_max_attempts: int = 3
     market_retry_base_delay_seconds: float = 0.1
     account_timeout_seconds: float = 5.0
+    request_locale: str = "en-US"
     spot_base_url: str = SPOT_BASE_URL
     futures_base_url: str = FUTURES_BASE_URL
     service_auth_token: str = field(default="", repr=False)
@@ -63,6 +64,11 @@ class Settings:
             "market_retry_base_delay_seconds",
         )
         _validate_positive_number(self.account_timeout_seconds, "account_timeout_seconds")
+        object.__setattr__(
+            self,
+            "request_locale",
+            _normalize_non_empty_text(self.request_locale, "request_locale"),
+        )
         if not isinstance(self.service_auth_token, str):
             raise SettingsError("service_auth_token must be a string.")
         if self.service_auth_token:
@@ -150,6 +156,7 @@ class Settings:
                 "WEEX_ACCOUNT_TIMEOUT_SECONDS",
                 defaults.account_timeout_seconds,
             ),
+            request_locale=source.get("WEEX_LOCALE", "").strip() or defaults.request_locale,
             spot_base_url=_normalize_https_origin(
                 source.get("WEEX_SPOT_BASE_URL", defaults.spot_base_url),
                 "WEEX_SPOT_BASE_URL",

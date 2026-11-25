@@ -565,7 +565,25 @@ def build_default_registry(
         "properties": {
             "market": {"type": "string", "enum": ["spot", "futures"]},
             "symbol": {"type": "string", "minLength": 1},
+            "symbols": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
         },
+        "oneOf": [
+            {
+                "properties": {"market": {"const": "spot"}},
+                "required": ["market"],
+                "allOf": [{"not": {"required": ["symbol", "symbols"]}}],
+            },
+            {
+                "properties": {"market": {"const": "futures"}},
+                "required": ["market"],
+                "allOf": [{"not": {"required": ["symbols"]}}],
+            },
+        ],
     }
     market_recent_trades_schema: dict[str, Any] = {
         "type": "object",

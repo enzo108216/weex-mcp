@@ -544,6 +544,7 @@ def build_default_service(
             spot_base_url=settings.spot_base_url,
             futures_base_url=settings.futures_base_url,
             timeout_seconds=settings.market_timeout_seconds,
+            locale=settings.request_locale,
             max_attempts=settings.market_max_attempts,
             retry_base_delay_seconds=settings.market_retry_base_delay_seconds,
         )
@@ -598,6 +599,7 @@ def build_default_service(
             spot_base_url=settings.spot_base_url,
             futures_base_url=settings.futures_base_url,
             timeout_seconds=settings.account_timeout_seconds,
+            locale=settings.request_locale,
         ),
         partner_adapter=active_partner_adapter,
         trade_adapter=active_trade_adapter,
