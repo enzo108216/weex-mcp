@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,10 @@ _FUTURES_INCOME_MAX_RANGE_MS = 100 * _DAY_MS
 _FUTURES_TRADE_MAX_RANGE_MS = 7 * _DAY_MS
 _DECIMAL_STRING_PATTERN = r"^\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\s*$"
 _OAUTH_SAFE_STRING_PATTERN = r"^[A-Za-z0-9._~-]+$"
+_MODULE_NAMES = frozenset({"broker", "market", "account", "partner", "trade"})
+_DEFAULT_MODULE_NAMES = frozenset({"broker", "market", "account", "trade"})
+_CREDENTIAL_MODE_ORDER = ("credential_ref", "encrypted_envelope", "plaintext")
+_CREDENTIAL_MODES = frozenset(_CREDENTIAL_MODE_ORDER)
 
 
 _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -44,6 +49,51 @@ _MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
         "user_confirmation": {"type": "object"},
         "clarification_required": {"type": "boolean"},
         "clarification_prompt": {"type": "string"},
+        "outcome": {
+            "type": "object",
+            "required": ["class", "write_attempted", "action"],
+            "properties": {
+                "class": {
+                    "type": "string",
+                    "enum": ["not_sent", "definitive_rejection", "accepted", "unknown", "partial"],
+                },
+                "write_attempted": {"type": "boolean"},
+                "action": {"type": "string", "minLength": 1},
+                "client_order_id": {"type": "string", "minLength": 1},
+                "operation_reference": {"type": "string", "minLength": 1},
+                "reconcile_identity": {"type": "string", "minLength": 1},
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["class", "write_attempted", "action"],
+                        "properties": {
+                            "class": {
+                                "type": "string",
+                                "enum": ["not_sent", "definitive_rejection", "accepted", "unknown"],
+                            },
+                            "write_attempted": {"type": "boolean"},
+                            "action": {"type": "string", "minLength": 1},
+                            "client_order_id": {"type": "string", "minLength": 1},
+                            "operation_reference": {"type": "string", "minLength": 1},
+                            "reconcile_identity": {"type": "string", "minLength": 1},
+                            "error_code": {
+                                "type": "string",
+                                "pattern": r"^[A-Za-z0-9_.:-]{1,64}$",
+                            },
+                        },
+                        "anyOf": [
+                            {"required": ["client_order_id"]},
+                            {"required": ["operation_reference"]},
+                            {"required": ["reconcile_identity"]},
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "additionalProperties": False,
+        },
     },
     "additionalProperties": True,
 }
@@ -53,6 +103,8 @@ _TOOL_TITLES = {
     "broker_oauth_generate_authorization_url": "Generate Broker OAuth authorization URL",
     "broker_oauth_exchange_code_for_api_key": "Exchange Broker OAuth code for API key",
     "market_get_symbol_price": "Get symbol price",
+    "market_get_server_time": "Get server time",
+    "market_ping": "Test Spot connectivity",
     "market_get_depth": "Get order book depth",
     "market_get_klines": "Get candlestick data",
     "market_get_exchange_info": "Get exchange information",
@@ -65,6 +117,7 @@ _TOOL_TITLES = {
     "market_get_catalog": "Get WEEX market catalogs",
     "account_get_balance": "Get account balance",
     "account_get_positions": "Get futures positions",
+    "account_get_position": "Get one futures position",
     "account_get_orders": "Get account orders",
     "account_get_trades": "Get account trades",
     "account_get_bills": "Get account bills",
@@ -73,6 +126,13 @@ _TOOL_TITLES = {
     "account_get_symbol_config": "Get futures symbol configuration",
     "account_get_conditional_orders": "Get futures conditional orders",
     "account_get_transfer_records": "Get Spot transfer records",
+    "partner_get_affiliate_uids": "Get affiliate UIDs",
+    "partner_get_channel_user_trade_and_asset": "Get channel user trade and asset data",
+    "partner_get_affiliate_commission": "Get affiliate commission records",
+    "partner_query_sub_channel_transactions": "Query sub-channel transactions",
+    "partner_verify_referrals": "Verify referrals",
+    "partner_get_referral_assets": "Get referral assets",
+    "partner_get_referral_deal_data": "Get referral deal data",
     "trade_preview_order": "Preview order",
     "trade_confirm_order": "Confirm order",
     "trade_preview_cancel_order": "Preview order cancellation",
@@ -114,6 +174,8 @@ _FIELD_DESCRIPTIONS = {
     "market": "WEEX market family: spot or futures.",
     "trading_mode": "Account or trading environment: live or demo.",
     "symbol": "Instrument symbol in the WEEX catalog, for example BTCUSDT.",
+    "symbols": "Non-empty list of unique WEEX instrument symbols.",
+    "symbol_status": "Spot symbol status filter: TRADING, HALT, or BREAK.",
     "price_type": "Futures price source: INDEX or MARK.",
     "interval": "K-line interval supported by the selected market.",
     "limit": "Maximum number of records requested, encoded as a decimal string.",
@@ -156,6 +218,9 @@ _FIELD_DESCRIPTIONS = {
     "confirmation": "Explicit confirmation object; accepted must be true.",
     "margin_mode": "Futures margin mode: cross or isolated.",
     "leverage": "Requested futures leverage as a positive decimal string.",
+    "cross_leverage": "Explicit cross leverage as a positive decimal string.",
+    "isolated_long_leverage": "Explicit isolated long leverage as a positive decimal string.",
+    "isolated_short_leverage": "Explicit isolated short leverage as a positive decimal string.",
     "separated_type": "Futures margin mode API representation.",
     "orders": "Bound list of typed orders included in this batch request.",
     "order_ids": "Unique WEEX order IDs included in this batch cancellation.",
@@ -179,6 +244,15 @@ _FIELD_DESCRIPTIONS = {
     "amount": "Positive isolated-margin adjustment amount.",
     "adjustment": "Position-margin adjustment direction; maps to WEEX type=1 for increase and type=2 for decrease.",
     "enabled": "Whether isolated auto-append margin should be enabled; maps to WEEX autoAppendMargin.",
+    "uid": "Optional invited-user UID as a canonical positive signed 64-bit decimal string.",
+    "user_id": "Required direct-user UID as a canonical positive signed 64-bit decimal string.",
+    "user_ids": "Non-empty list of canonical positive signed 64-bit UID strings.",
+    "sub_uid": "Optional sub-affiliate UID as a canonical positive signed 64-bit decimal string.",
+    "page_num": "Partner POST page number starting from 1, encoded as a decimal string.",
+    "page_size": "Partner page size from 1 through 100, encoded as a decimal string.",
+    "coin": "Partner commission coin filter: USDT or BTC.",
+    "product_type": "Partner product family: SPOT or FUTURES.",
+    "expected_environment": "Optional Partner environment binding: partner_production or partner_test.",
 }
 
 
@@ -270,7 +344,48 @@ class ToolRegistry:
         return self._tools.get(name)
 
 
-def build_default_registry() -> ToolRegistry:
+def _projection_values(
+    values: Iterable[str] | None,
+    *,
+    supported: frozenset[str],
+    field: str,
+) -> frozenset[str]:
+    if values is None:
+        return supported
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"{field} must be a non-empty iterable of strings.")
+    try:
+        selected = frozenset(values)
+    except TypeError:
+        raise ValueError(f"{field} must be a non-empty iterable of strings.") from None
+    if not selected:
+        raise ValueError(f"{field} must not be empty.")
+    if any(not isinstance(value, str) for value in selected):
+        raise ValueError(f"{field} must contain only strings.")
+    unknown = sorted(selected - supported)
+    if unknown:
+        raise ValueError(f"{field} contains unsupported values: {', '.join(unknown)}.")
+    return selected
+
+
+def build_default_registry(
+    *,
+    enabled_modules: Iterable[str] | None = None,
+    credential_modes: Iterable[str] | None = None,
+    allow_delegated_authorization: bool = False,
+) -> ToolRegistry:
+    if not isinstance(allow_delegated_authorization, bool):
+        raise ValueError("allow_delegated_authorization must be a boolean.")
+    active_modules = (
+        _DEFAULT_MODULE_NAMES
+        if enabled_modules is None
+        else _projection_values(enabled_modules, supported=_MODULE_NAMES, field="enabled_modules")
+    )
+    active_credential_modes = _projection_values(
+        credential_modes,
+        supported=_CREDENTIAL_MODES,
+        field="credential_modes",
+    )
     oauth_security_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
@@ -326,10 +441,16 @@ def build_default_registry() -> ToolRegistry:
     market_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["market", "symbol"],
+        "required": ["market"],
         "properties": {
             "market": {"type": "string", "enum": ["spot", "futures"]},
             "symbol": {"type": "string", "minLength": 1},
+            "symbols": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
             "price_type": {"type": "string", "minLength": 1},
         },
     }
@@ -338,15 +459,19 @@ def build_default_registry() -> ToolRegistry:
             "type": "object",
             "required": ["market"],
             "properties": {"market": {"const": "spot"}},
-            "allOf": [{"not": {"required": ["price_type"]}}],
+            "allOf": [
+                {"not": {"required": ["price_type"]}},
+                {"not": {"required": ["symbol", "symbols"]}},
+            ],
         },
         {
             "type": "object",
-            "required": ["market"],
+            "required": ["market", "symbol"],
             "properties": {
                 "market": {"const": "futures"},
                 "price_type": {"enum": ["INDEX", "MARK"]},
             },
+            "allOf": [{"not": {"required": ["symbols"]}}],
         },
     ]
     market_depth_schema: dict[str, Any] = {
@@ -397,7 +522,41 @@ def build_default_registry() -> ToolRegistry:
         "properties": {
             "market": {"type": "string", "enum": ["spot", "futures"]},
             "symbol": {"type": "string", "minLength": 1},
+            "symbols": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "symbol_status": {"type": "string", "enum": ["TRADING", "HALT", "BREAK"]},
         },
+        "oneOf": [
+            {
+                "required": ["market"],
+                "properties": {"market": {"const": "spot"}},
+                "allOf": [{"not": {"required": ["symbol", "symbols"]}}],
+            },
+            {
+                "required": ["market"],
+                "properties": {"market": {"const": "futures"}},
+                "allOf": [
+                    {"not": {"required": ["symbols"]}},
+                    {"not": {"required": ["symbol_status"]}},
+                ],
+            },
+        ],
+    }
+    market_server_time_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["market"],
+        "properties": {"market": {"type": "string", "enum": ["spot", "futures"]}},
+    }
+    market_ping_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["market"],
+        "properties": {"market": {"type": "string", "enum": ["spot"]}},
     }
     market_optional_symbol_schema: dict[str, Any] = {
         "type": "object",
@@ -500,58 +659,190 @@ def build_default_registry() -> ToolRegistry:
             {"properties": {"market": {"const": "futures"}, "catalog": {"const": "symbols"}}, "required": ["market", "catalog"]},
         ],
     }
+    credential_variants: dict[str, dict[str, Any]] = {
+        "credential_ref": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["type", "key_id", "ref"],
+            "properties": {
+                "type": {"const": "credential_ref"},
+                "key_id": {"type": "string", "minLength": 1},
+                "ref": {"type": "string", "minLength": 1},
+                "permissions": {"type": "array"},
+            },
+        },
+        "encrypted_envelope": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["type", "key_id", "ciphertext", "nonce", "alg"],
+            "properties": {
+                "type": {"const": "encrypted_envelope"},
+                "key_id": {"type": "string", "minLength": 1},
+                "ciphertext": {"type": "string", "minLength": 1},
+                "nonce": {"type": "string", "minLength": 1},
+                "alg": {"type": "string", "minLength": 1},
+                "permissions": {"type": "array"},
+            },
+        },
+        "plaintext": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["type", "api_key", "api_secret", "api_passphrase"],
+            "properties": {
+                "type": {"const": "plaintext"},
+                "api_key": {"type": "string", "minLength": 1},
+                "api_secret": {"type": "string", "minLength": 1},
+                "api_passphrase": {"type": "string", "minLength": 1},
+                "permissions": {"type": "array"},
+            },
+        },
+    }
+    credential_properties: dict[str, dict[str, Any]] = {
+        "type": {"type": "string"},
+        "key_id": {"type": "string", "minLength": 1},
+        "ref": {"type": "string", "minLength": 1},
+        "ciphertext": {"type": "string", "minLength": 1},
+        "nonce": {"type": "string", "minLength": 1},
+        "alg": {"type": "string", "minLength": 1},
+        "api_key": {"type": "string", "minLength": 1},
+        "api_secret": {"type": "string", "minLength": 1},
+        "api_passphrase": {"type": "string", "minLength": 1},
+        "permissions": {"type": "array"},
+    }
+    selected_property_names = {"type", "permissions"}
+    for mode in _CREDENTIAL_MODE_ORDER:
+        if mode in active_credential_modes:
+            selected_property_names.update(credential_variants[mode]["properties"])
     credential_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
         "oneOf": [
+            credential_variants[mode]
+            for mode in _CREDENTIAL_MODE_ORDER
+            if mode in active_credential_modes
+        ],
+        "properties": {
+            name: schema
+            for name, schema in credential_properties.items()
+            if name in selected_property_names
+        },
+    }
+    partner_uid_schema = _integer_string(minimum=1, maximum=_LONG_MAX)
+    partner_millisecond_schema = _integer_string(minimum=0, maximum=_LONG_MAX)
+    partner_page_schema = {
+        "type": "string",
+        "pattern": _CANONICAL_POSITIVE_INTEGER_PATTERN,
+        "x-weex-stringIntegerRange": {"minimum": 1},
+    }
+    partner_page_size_schema = _integer_string(minimum=1, maximum=100)
+    partner_date_schema = {"type": "string", "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+    partner_environment_schema = {
+        "type": "string",
+        "enum": ["partner_production", "partner_test"],
+    }
+    partner_common_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["credential"],
+        "properties": {
+            "credential": credential_schema,
+            "uid": partner_uid_schema,
+            "start_time": partner_millisecond_schema,
+            "end_time": partner_millisecond_schema,
+            "page": partner_page_schema,
+            "page_size": partner_page_size_schema,
+            "expected_environment": partner_environment_schema,
+        },
+        "allOf": [_optional_time_pair_constraint()],
+    }
+    partner_affiliate_uids_schema = deepcopy(partner_common_schema)
+    partner_channel_trade_asset_schema = deepcopy(partner_common_schema)
+    partner_affiliate_commission_schema = deepcopy(partner_common_schema)
+    partner_affiliate_commission_schema["properties"].update(
+        {
+            "coin": {"type": "string", "enum": ["USDT", "BTC"]},
+            "product_type": {"type": "string", "enum": ["SPOT", "FUTURES"]},
+        }
+    )
+    nullable_partner_millisecond_schema = {
+        "oneOf": [partner_millisecond_schema, {"enum": [None]}],
+    }
+    partner_sub_channel_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["credential", "product_type", "start_time", "end_time"],
+        "properties": {
+            "credential": credential_schema,
+            "sub_uid": partner_uid_schema,
+            "start_time": nullable_partner_millisecond_schema,
+            "end_time": nullable_partner_millisecond_schema,
+            "product_type": {"type": "string", "enum": ["SPOT", "FUTURES"]},
+            "page_num": partner_page_schema,
+            "page_size": partner_page_size_schema,
+            "expected_environment": partner_environment_schema,
+        },
+        "oneOf": [
             {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["type", "key_id", "ref"],
+                "required": ["product_type", "start_time", "end_time"],
                 "properties": {
-                    "type": {"const": "credential_ref"},
-                    "key_id": {"type": "string", "minLength": 1},
-                    "ref": {"type": "string", "minLength": 1},
-                    "permissions": {"type": "array"},
+                    "product_type": {"enum": ["SPOT", "FUTURES"]},
+                    "start_time": partner_millisecond_schema,
+                    "end_time": partner_millisecond_schema,
                 },
             },
             {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["type", "key_id", "ciphertext", "nonce", "alg"],
+                "required": ["product_type", "start_time", "end_time", "expected_environment"],
                 "properties": {
-                    "type": {"const": "encrypted_envelope"},
-                    "key_id": {"type": "string", "minLength": 1},
-                    "ciphertext": {"type": "string", "minLength": 1},
-                    "nonce": {"type": "string", "minLength": 1},
-                    "alg": {"type": "string", "minLength": 1},
-                    "permissions": {"type": "array"},
-                },
-            },
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["type", "api_key", "api_secret", "api_passphrase"],
-                "properties": {
-                    "type": {"const": "plaintext"},
-                    "api_key": {"type": "string", "minLength": 1},
-                    "api_secret": {"type": "string", "minLength": 1},
-                    "api_passphrase": {"type": "string", "minLength": 1},
-                    "permissions": {"type": "array"},
+                    "product_type": {"enum": ["SPOT", "FUTURES"]},
+                    "start_time": {"enum": [None]},
+                    "end_time": {"enum": [None]},
+                    "expected_environment": {"const": "partner_test"},
                 },
             },
         ],
+    }
+    partner_verify_referrals_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["credential", "user_ids"],
         "properties": {
-            "type": {"type": "string"},
-            "key_id": {"type": "string", "minLength": 1},
-            "ref": {"type": "string", "minLength": 1},
-            "ciphertext": {"type": "string", "minLength": 1},
-            "nonce": {"type": "string", "minLength": 1},
-            "alg": {"type": "string", "minLength": 1},
-            "api_key": {"type": "string", "minLength": 1},
-            "api_secret": {"type": "string", "minLength": 1},
-            "api_passphrase": {"type": "string", "minLength": 1},
-            "permissions": {"type": "array"},
+            "credential": credential_schema,
+            "user_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": True,
+                "items": partner_uid_schema,
+            },
+            "expected_environment": partner_environment_schema,
+        },
+    }
+    partner_referral_assets_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["credential", "user_id", "start_time", "end_time"],
+        "properties": {
+            "credential": credential_schema,
+            "user_id": partner_uid_schema,
+            "start_time": partner_date_schema,
+            "end_time": partner_date_schema,
+            "expected_environment": partner_environment_schema,
+        },
+    }
+    partner_referral_deal_data_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["credential", "start_time", "end_time"],
+        "properties": {
+            "credential": credential_schema,
+            "user_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": partner_uid_schema,
+            },
+            "start_time": partner_date_schema,
+            "end_time": partner_date_schema,
+            "expected_environment": partner_environment_schema,
         },
     }
     account_schema: dict[str, Any] = {
@@ -571,6 +862,17 @@ def build_default_registry() -> ToolRegistry:
         "properties": {
             "market": {"type": "string", "enum": ["spot", "futures"]},
             "trading_mode": {"type": "string", "enum": ["live", "demo"]},
+            "symbol": {"type": "string", "minLength": 1},
+            "credential": credential_schema,
+        },
+    }
+    account_position_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["market", "trading_mode", "symbol", "credential"],
+        "properties": {
+            "market": {"type": "string", "enum": ["futures"]},
+            "trading_mode": {"type": "string", "enum": ["live"]},
             "symbol": {"type": "string", "minLength": 1},
             "credential": credential_schema,
         },
@@ -741,7 +1043,7 @@ def build_default_registry() -> ToolRegistry:
     trade_leverage_preview_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
-        "required": ["market", "trading_mode", "symbol", "margin_mode", "leverage", "credential"],
+        "required": ["market", "trading_mode", "symbol", "credential"],
         "properties": {
             "market": {"type": "string", "enum": ["futures"]},
             "trading_mode": {"type": "string", "enum": ["live"]},
@@ -749,8 +1051,38 @@ def build_default_registry() -> ToolRegistry:
             "margin_mode": {"type": "string", "enum": ["cross", "isolated", "CROSS", "CROSSED", "ISOLATED"]},
             "position_side": {"type": "string", "enum": ["LONG", "SHORT", "long", "short"]},
             "leverage": _positive_decimal_string(),
+            "cross_leverage": _positive_decimal_string(),
+            "isolated_long_leverage": _positive_decimal_string(),
+            "isolated_short_leverage": _positive_decimal_string(),
             "credential": credential_schema,
         },
+        "oneOf": [
+            {
+                "required": ["margin_mode", "leverage"],
+                "allOf": [
+                    {"not": {"required": [field]}}
+                    for field in (
+                        "cross_leverage",
+                        "isolated_long_leverage",
+                        "isolated_short_leverage",
+                    )
+                ],
+            },
+            {
+                "anyOf": [
+                    {"required": [field]}
+                    for field in (
+                        "cross_leverage",
+                        "isolated_long_leverage",
+                        "isolated_short_leverage",
+                    )
+                ],
+                "allOf": [
+                    {"not": {"required": ["leverage"]}},
+                    {"not": {"required": ["position_side"]}},
+                ],
+            },
+        ],
     }
     trade_margin_mode_preview_schema: dict[str, Any] = {
         "type": "object",
@@ -1159,19 +1491,20 @@ def build_default_registry() -> ToolRegistry:
         }
     )
     trade_preview_schema["x-weex-deferConditionalValidation"] = True
-    trade_confirm_schema = _confirmation_schema(trade_preview_schema, confirmation_schema)
-    trade_cancel_confirm_schema = _confirmation_schema(trade_cancel_preview_schema, confirmation_schema)
-    trade_leverage_confirm_schema = _confirmation_schema(trade_leverage_preview_schema, confirmation_schema)
-    trade_margin_mode_confirm_schema = _confirmation_schema(trade_margin_mode_preview_schema, confirmation_schema)
-    trade_batch_order_confirm_schema = _confirmation_schema(trade_batch_order_preview_schema, confirmation_schema)
-    trade_batch_cancel_confirm_schema = _confirmation_schema(trade_batch_cancel_preview_schema, confirmation_schema)
-    trade_cancel_scope_confirm_schema = _confirmation_schema(trade_cancel_scope_preview_schema, confirmation_schema)
-    trade_conditional_order_confirm_schema = _confirmation_schema(trade_conditional_order_preview_schema, confirmation_schema)
-    trade_conditional_cancel_confirm_schema = _confirmation_schema(trade_conditional_cancel_preview_schema, confirmation_schema)
-    trade_tp_sl_confirm_schema = _confirmation_schema(trade_tp_sl_preview_schema, confirmation_schema)
-    trade_close_positions_confirm_schema = _confirmation_schema(trade_close_positions_preview_schema, confirmation_schema)
-    trade_position_margin_confirm_schema = _confirmation_schema(trade_position_margin_preview_schema, confirmation_schema)
-    trade_auto_append_margin_confirm_schema = _confirmation_schema(trade_auto_append_margin_preview_schema, confirmation_schema)
+    trade_leverage_preview_schema["x-weex-deferConditionalValidation"] = True
+    trade_confirm_schema = _confirmation_schema(trade_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_cancel_confirm_schema = _confirmation_schema(trade_cancel_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_leverage_confirm_schema = _confirmation_schema(trade_leverage_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_margin_mode_confirm_schema = _confirmation_schema(trade_margin_mode_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_batch_order_confirm_schema = _confirmation_schema(trade_batch_order_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_batch_cancel_confirm_schema = _confirmation_schema(trade_batch_cancel_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_cancel_scope_confirm_schema = _confirmation_schema(trade_cancel_scope_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_conditional_order_confirm_schema = _confirmation_schema(trade_conditional_order_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_conditional_cancel_confirm_schema = _confirmation_schema(trade_conditional_cancel_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_tp_sl_confirm_schema = _confirmation_schema(trade_tp_sl_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_close_positions_confirm_schema = _confirmation_schema(trade_close_positions_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_position_margin_confirm_schema = _confirmation_schema(trade_position_margin_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
+    trade_auto_append_margin_confirm_schema = _confirmation_schema(trade_auto_append_margin_preview_schema, confirmation_schema, allow_delegated_authorization=allow_delegated_authorization)
     for schema in (
         broker_oauth_authorization_schema,
         broker_oauth_exchange_schema,
@@ -1179,14 +1512,24 @@ def build_default_registry() -> ToolRegistry:
         market_depth_schema,
         market_klines_schema,
         market_exchange_info_schema,
+        market_server_time_schema,
+        market_ping_schema,
         market_optional_symbol_schema,
         market_recent_trades_schema,
         market_funding_schema,
         market_open_interest_schema,
         market_advanced_klines_schema,
         market_catalog_schema,
+        partner_affiliate_uids_schema,
+        partner_channel_trade_asset_schema,
+        partner_affiliate_commission_schema,
+        partner_sub_channel_schema,
+        partner_verify_referrals_schema,
+        partner_referral_assets_schema,
+        partner_referral_deal_data_schema,
         account_schema,
         account_positions_schema,
+        account_position_schema,
         account_orders_schema,
         account_trades_schema,
         account_bills_schema,
@@ -1223,8 +1566,7 @@ def build_default_registry() -> ToolRegistry:
         trade_auto_append_margin_confirm_schema,
     ):
         _add_field_descriptions(schema)
-    return ToolRegistry(
-        [
+    tool_definitions = [
             ToolDefinition(
                 name="broker_oauth_generate_authorization_url",
                 module="broker",
@@ -1281,6 +1623,20 @@ def build_default_registry() -> ToolRegistry:
                 description="Get WEEX trading rules/exchange info. Public endpoint; no credential required.",
                 input_schema=market_exchange_info_schema,
             ),
+            ToolDefinition(
+                name="market_get_server_time",
+                module="market",
+                permission="NONE",
+                description="Get the WEEX Spot or Futures server time. Public endpoint; no credential required.",
+                input_schema=market_server_time_schema,
+            ),
+            ToolDefinition(
+                name="market_ping",
+                module="market",
+                permission="NONE",
+                description="Test WEEX Spot public API connectivity using the fixed ping endpoint.",
+                input_schema=market_ping_schema,
+            ),
             ToolDefinition(name="market_get_ticker_24h", module="market", permission="NONE", description="Get WEEX 24-hour ticker statistics.", input_schema=market_optional_symbol_schema),
             ToolDefinition(name="market_get_book_ticker", module="market", permission="NONE", description="Get WEEX best bid and ask quotes.", input_schema=market_optional_symbol_schema),
             ToolDefinition(name="market_get_recent_trades", module="market", permission="NONE", description="Get recent public WEEX trades.", input_schema=market_recent_trades_schema),
@@ -1288,6 +1644,55 @@ def build_default_registry() -> ToolRegistry:
             ToolDefinition(name="market_get_open_interest", module="market", permission="NONE", description="Get current futures open interest.", input_schema=market_open_interest_schema),
             ToolDefinition(name="market_get_advanced_klines", module="market", permission="NONE", description="Get futures historical, index-price, or mark-price K-lines.", input_schema=market_advanced_klines_schema),
             ToolDefinition(name="market_get_catalog", module="market", permission="NONE", description="Get WEEX coin metadata or API-tradable symbol catalogs.", input_schema=market_catalog_schema),
+            ToolDefinition(
+                name="partner_get_affiliate_uids",
+                module="partner",
+                permission="USER_DATA",
+                description="Get read-only WEEX Partner affiliate UID records.",
+                input_schema=partner_affiliate_uids_schema,
+            ),
+            ToolDefinition(
+                name="partner_get_channel_user_trade_and_asset",
+                module="partner",
+                permission="USER_DATA",
+                description="Get read-only WEEX Partner channel-user trade and asset data.",
+                input_schema=partner_channel_trade_asset_schema,
+            ),
+            ToolDefinition(
+                name="partner_get_affiliate_commission",
+                module="partner",
+                permission="USER_DATA",
+                description="Get read-only WEEX Partner affiliate commission records.",
+                input_schema=partner_affiliate_commission_schema,
+            ),
+            ToolDefinition(
+                name="partner_query_sub_channel_transactions",
+                module="partner",
+                permission="USER_DATA",
+                description="Query read-only WEEX Partner sub-channel transaction statistics.",
+                input_schema=partner_sub_channel_schema,
+            ),
+            ToolDefinition(
+                name="partner_verify_referrals",
+                module="partner",
+                permission="USER_DATA",
+                description="Verify read-only WEEX Partner referral relationships.",
+                input_schema=partner_verify_referrals_schema,
+            ),
+            ToolDefinition(
+                name="partner_get_referral_assets",
+                module="partner",
+                permission="USER_DATA",
+                description="Get read-only WEEX Partner referral asset data.",
+                input_schema=partner_referral_assets_schema,
+            ),
+            ToolDefinition(
+                name="partner_get_referral_deal_data",
+                module="partner",
+                permission="USER_DATA",
+                description="Get read-only WEEX Partner referral deal data.",
+                input_schema=partner_referral_deal_data_schema,
+            ),
             ToolDefinition(
                 name="account_get_balance",
                 module="account",
@@ -1301,6 +1706,13 @@ def build_default_registry() -> ToolRegistry:
                 permission="USER_DATA",
                 description="Get futures positions using a request-level credential context.",
                 input_schema=account_positions_schema,
+            ),
+            ToolDefinition(
+                name="account_get_position",
+                module="account",
+                permission="USER_DATA",
+                description="Get one live futures position using a request-level credential context.",
+                input_schema=account_position_schema,
             ),
             ToolDefinition(
                 name="account_get_orders",
@@ -1403,15 +1815,43 @@ def build_default_registry() -> ToolRegistry:
             ToolDefinition(name="trade_preview_auto_append_margin", module="trade", permission="TRADE", description="Precheck an isolated-position auto-append margin update.", input_schema=trade_auto_append_margin_preview_schema),
             ToolDefinition(name="trade_confirm_auto_append_margin", module="trade", permission="TRADE", description="Recheck and submit a bound auto-append margin update.", input_schema=trade_auto_append_margin_confirm_schema),
         ]
-    )
+    return ToolRegistry([tool for tool in tool_definitions if tool.module in active_modules])
 
 
-def _confirmation_schema(base_schema: dict[str, Any], confirmation_schema: dict[str, Any]) -> dict[str, Any]:
+def _confirmation_schema(
+    base_schema: dict[str, Any],
+    confirmation_schema: dict[str, Any],
+    *,
+    allow_delegated_authorization: bool,
+) -> dict[str, Any]:
     schema = deepcopy(base_schema)
-    schema["required"] = [*schema.get("required", []), "confirmation"]
+    schema["required"] = [*schema.get("required", [])]
     schema["properties"]["preview_id"] = {"type": "string", "minLength": 1}
     schema["properties"]["approval_token"] = {"type": "string", "minLength": 1}
     schema["properties"]["confirmation"] = deepcopy(confirmation_schema)
+    if allow_delegated_authorization:
+        schema["properties"]["delegated_authorization"] = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["ref"],
+            "properties": {"ref": {"type": "string", "minLength": 1}},
+        }
+        schema.setdefault("allOf", []).append(
+            {
+                "oneOf": [
+                    {
+                        "required": ["confirmation"],
+                        "not": {"required": ["delegated_authorization"]},
+                    },
+                    {
+                        "required": ["delegated_authorization"],
+                        "not": {"required": ["confirmation"]},
+                    },
+                ]
+            }
+        )
+    else:
+        schema["required"].append("confirmation")
     schema.setdefault("allOf", []).append(
         {
             "oneOf": [

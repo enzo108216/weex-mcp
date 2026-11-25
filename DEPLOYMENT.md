@@ -1,16 +1,21 @@
 # WEEX MCP deployment
 
-This package supports two runtime modes:
+Transport and runtime profile are separate choices:
 
-- Local mode: run `weex-mcp stdio`, or import `build_default_service` /
-  `build_asgi_app` in a Python host. It keeps the lightweight core
-  dependency-free and preserves the existing local defaults.
-- Cloud mode: install the `server` extra and start `weex-mcp serve`. Cloud mode
-  validates required shared secrets before opening a listening socket.
+- `default`: used by `weex-mcp stdio` and `build_default_service`. It exposes
+  26 tools with Trade off or 52 with Trade on and advertises all core
+  credential schema modes for an embedding host.
+- `local_user`: built by `build_local_user_service` for a profile-bound local
+  host. It accepts only `credential_ref`, exposes Local-only Partner reads,
+  excludes Broker OAuth, and has 31/57 tools with Trade off/on.
+- `broker_server`: used by `weex-mcp serve` / `build_cloud_app`. It accepts
+  request-scoped `plaintext`, includes Broker OAuth, excludes Partner and
+  delegated authorization, and has 26/52 tools with Trade off/on.
 
-Neither mode stores API credentials, OAuth state, preview state, idempotency
-results, or user sessions. Account and Trade credentials and Broker OAuth
-client values are supplied per MCP request and used only for that request.
+No runtime profile stores API credentials, OAuth state, preview state, idempotency
+results, or user sessions. Credential refs or plaintext Account, Partner, and
+Trade credentials and Broker OAuth client values are supplied per request and
+used only for that request.
 
 ## Required cloud configuration
 
@@ -32,7 +37,7 @@ client values are supplied per MCP request and used only for that request.
 | `WEEX_SPOT_BASE_URL` | No | `https://api-spot.weex.com` | Deployment-selected Spot HTTPS origin. Paths, credentials, query strings, and fragments are rejected. |
 | `WEEX_FUTURES_BASE_URL` | No | `https://api-contract.weex.com` | Deployment-selected Futures HTTPS origin with the same origin-only validation. |
 | `WEEX_SERVER_NAME` | No | `weex-mcp` | Non-empty service name exposed by health endpoints. |
-| `WEEX_AUDIT_LOG_FILE` | No | empty; Compose default: `/var/log/weex-mcp/weex_mcp_audit.log` | Optional local JSONL audit file for redacted Account/Broker/Trade tool events. |
+| `WEEX_AUDIT_LOG_FILE` | No | empty; Compose default: `/var/log/weex-mcp/weex_mcp_audit.log` | Optional local JSONL audit file for redacted Account/Broker/Partner/Trade tool events. |
 
 Do not put either required secret in an image, repository, URL, or command-line
 argument. Inject them through the deployment platform's secret mechanism.
@@ -118,7 +123,10 @@ with shared placeholder credentials.
 
 To target an approved staging environment, set both upstream origins in the
 deployment environment or env file. They apply together to Market, Account,
-and Trade adapters and cannot be overridden by an MCP tool request. Keep Trade
+and Trade adapters and cannot be overridden by an MCP tool request. Local User
+Partner calls additionally accept only the official production Spot origin or
+a non-bare HTTPS subdomain of `weex.tech`, use a fixed 30-second timeout, and
+never retry automatically. Keep Trade
 disabled until the chosen environment, account permissions, and cleanup plan
 have been verified.
 
@@ -137,8 +145,8 @@ eras:
   that version in `MCP-Protocol-Version`;
 - modern `2026-07-28`: the configured protocol header, matching `_meta`,
   `Mcp-Method`, and `Mcp-Name` for named calls are mandatory;
-- a plaintext credential object in each Account/Trade tool call when that tool
-  needs WEEX authentication;
+- a plaintext credential object in each Broker Server Account or Trade tool
+  call when that tool needs WEEX authentication;
 - per-request Broker OAuth values for the two Broker tools. The service does
   not bind or persist merchant clients, state, tokens, or generated API keys.
 
@@ -164,11 +172,26 @@ or newly created API credential. The built-in Uvicorn access log does not log
 bodies, but surrounding infrastructure must be checked separately.
 
 If `WEEX_AUDIT_LOG_FILE` is set, the service appends one redacted JSON object
-per Account/Broker/Trade tool call to that file. The default Compose
+per Account/Broker/Partner/Trade tool call to that file. The default Compose
 configuration sets it to `/var/log/weex-mcp/weex_mcp_audit.log` and mounts
 `./logs` from the host, so the host file is `logs/weex_mcp_audit.log`. Raw credential values are
 redacted before writing; retain, rotate, and protect the mounted `logs`
 directory according to the deployment's audit policy.
+
+## Compatibility preflight
+
+Read `_meta["com.weex/mcp"].compatibility` from `server/discover` before a host
+starts business requests. Validate the expected `runtime_profile`, package and
+tool-contract versions, exact tool requirements, credential modes, and
+delegated-authorization flag. `tool_set_digest` binds sorted tool names,
+`schema_digest` binds their input/output schemas, and `manifest_digest` binds
+the whole compatibility manifest. The manifest is derived from the effective
+Trade-on/off catalog and never contains upstream origins, service secrets,
+credential values, or credential refs.
+
+Do not treat a matching package version alone as compatibility evidence. A
+tool or schema mismatch fails closed; switch the package and its client as one
+versioned unit instead of falling back to request-level direct REST.
 
 ## Scaling, rotation, and retry boundary
 
@@ -206,16 +229,22 @@ not provide built-in rate limiting.
 
 ## Release checklist
 
-1. Update the single package version in `src/weex_mcp/_version.py`, then keep
-   `server.json` package and server versions identical.
-2. Run the full unit, Ruff, mypy, sdist/wheel, installed-wheel, Registry schema,
-   Compose configuration, and Docker build checks used by CI.
-3. Publish the wheel and sdist to PyPI before submitting the matching
-   `server.json` to the MCP Registry; Registry ownership verification reads the
-   `mcp-name` marker from the published PyPI README.
-4. Deploy the same immutable version to a non-production environment, verify
-   `/readyz`, authenticated MCP requests, and the expected Trade-disabled tool
-   catalog, then promote the exact artifact.
+Version `0.2.0` is currently an unpublished candidate; this repository state
+does not authorize a tag, PyPI upload, MCP Registry submission, or deployment.
+
+1. Keep the single package version in `src/weex_mcp/_version.py` identical to
+   both version fields in `server.json`.
+2. From a fixed commit, build one candidate artifact set outside the checkout,
+   record wheel/sdist hashes and every profile manifest digest, and run the
+   full unit, Ruff, mypy, installed-wheel, Registry schema, Compose, and Docker
+   checks used by CI.
+3. Preserve that candidate artifact. After separate publication authorization,
+   upload the exact artifact bytes that passed verification; do not rebuild and
+   claim byte identity. Publish PyPI before submitting the matching
+   `server.json` to the MCP Registry.
+4. Deploy the same immutable artifact to a non-production environment, verify
+   `/readyz`, authenticated MCP requests, compatibility preflight, and the
+   expected Trade-disabled catalog, then promote only that exact artifact.
 
 Do not publish a Registry version whose PyPI package is missing, and do not
 reuse a version number for different code. External publication credentials
@@ -223,8 +252,9 @@ belong in the release platform, never in this repository.
 
 ## Rollback
 
-Roll back the image/wheel and its clients as one compatible version. The current
-stateless confirmation contract resubmits complete action parameters with a
+The rollback boundary is the package plus its clients and compatibility
+manifest. Roll back the image/wheel and its clients as one compatible version.
+The current stateless confirmation contract resubmits complete action parameters with a
 signed `preview_id`; `approval_token` is only a deprecated compatibility alias
 accepted during client migration. Do not mix this contract with historical
 stateful preview implementations. No cache or database cleanup is required

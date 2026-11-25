@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from . import __version__
 from .adapters.account import AccountAdapter, WeexAccountRestAdapter
 from .adapters.broker_oauth import BrokerOAuthAdapter, WeexBrokerOAuthAdapter
 from .adapters.market import MarketPriceAdapter, WeexMarketRestAdapter
+from .adapters.partner import PartnerAdapter, WeexPartnerRestAdapter
 from .adapters.trade_guard import FailClosedTradeAdapter, TradeGuardAdapter
 from .adapters.trade_rest import WeexTradeRestAdapter
 from .approval_token import ApprovalTokenCodec
-from .audit import AuditSink, FileAuditSink, LoggingAuditSink
+from .audit import AuditSink, FileAuditSink, LoggingAuditSink, make_fingerprint
+from .compatibility import build_compatibility_manifest
 from .credential_context import CredentialContext, CredentialError
+from .execution_authorization import ExecutionAuthorizer, FailClosedExecutionAuthorizer
 from .response import error_response, jsonrpc_error, jsonrpc_result, mcp_call_tool_result
 from .schema_validation import SchemaValidationError, validate_tool_arguments
 from .secret_provider import RequestSecretProvider, SecretProvider
@@ -26,6 +31,7 @@ from .tools.account import (
     get_conditional_orders,
     get_config,
     get_orders,
+    get_position,
     get_positions,
     get_symbol_config,
     get_trades,
@@ -42,8 +48,19 @@ from .tools.market import (
     get_klines,
     get_open_interest,
     get_recent_trades,
+    get_server_time,
     get_symbol_price,
     get_ticker_24h,
+    ping,
+)
+from .tools.partner import (
+    get_affiliate_commission,
+    get_affiliate_uids,
+    get_channel_user_trade_and_asset,
+    get_referral_assets,
+    get_referral_deal_data,
+    query_sub_channel_transactions,
+    verify_referrals,
 )
 from .tools.trade import (
     confirm_cancel_order,
@@ -51,6 +68,7 @@ from .tools.trade import (
     confirm_margin_mode,
     confirm_mutation,
     confirm_order,
+    not_sent_outcome_for_confirm,
     preview_cancel_order,
     preview_leverage,
     preview_margin_mode,
@@ -61,27 +79,83 @@ from .tools.trade import (
 LEGACY_PROTOCOL_VERSIONS = ("2025-06-18", "2025-11-25")
 
 
+def _route_approval_binding(*, host_kind: str, settings: Settings) -> dict[str, str]:
+    return {
+        "host_kind": host_kind,
+        "route_fingerprint": make_fingerprint(
+            "approval_route",
+            settings.spot_base_url,
+            settings.futures_base_url,
+        ),
+    }
+
+
 class McpService:
     def __init__(
         self,
         *,
         settings: Settings,
+        runtime_profile: str,
         registry: ToolRegistry,
         approval_codec: ApprovalTokenCodec,
         market_adapter: MarketPriceAdapter,
-        broker_oauth_adapter: BrokerOAuthAdapter,
+        broker_oauth_adapter: BrokerOAuthAdapter | None,
         account_adapter: AccountAdapter,
+        partner_adapter: PartnerAdapter | None,
         trade_adapter: TradeGuardAdapter,
+        execution_authorizer: ExecutionAuthorizer,
         audit_sink: AuditSink,
     ):
         self.settings = settings
+        self.runtime_profile = runtime_profile
         self.registry = registry
         self.approval_codec = approval_codec
         self.market_adapter = market_adapter
         self.broker_oauth_adapter = broker_oauth_adapter
         self.account_adapter = account_adapter
+        self.partner_adapter = partner_adapter
         self.trade_adapter = trade_adapter
+        self.execution_authorizer = execution_authorizer
         self.audit_sink = audit_sink
+        self.compatibility_manifest = build_compatibility_manifest(
+            package_version=__version__,
+            runtime_profile=runtime_profile,
+            tools=self._effective_tools(),
+        )
+
+    def _effective_tools(self) -> list[dict[str, Any]]:
+        return [
+            tool
+            for tool in self.registry.list_tools()
+            if self.settings.trade_enabled or tool["_meta"]["com.weex/mcp"]["module"] != "trade"
+        ]
+
+    def _instructions(self) -> str:
+        modules = {
+            tool["_meta"]["com.weex/mcp"]["module"]
+            for tool in self._effective_tools()
+        }
+        capabilities = [
+            description
+            for module, description in (
+                ("broker", "Broker OAuth"),
+                ("market", "public market data"),
+                ("account", "read-only account queries"),
+                ("partner", "read-only Partner queries"),
+                ("trade", "stateless preview/confirm trading"),
+            )
+            if module in modules
+        ]
+        prefix = "WEEX MCP tools"
+        if not capabilities:
+            return f"{prefix} with no enabled tool capabilities."
+        if len(capabilities) == 1:
+            summary = capabilities[0]
+        elif len(capabilities) == 2:
+            summary = " and ".join(capabilities)
+        else:
+            summary = f"{', '.join(capabilities[:-1])}, and {capabilities[-1]}"
+        return f"{prefix} for {summary}."
 
     def handle_jsonrpc(
         self,
@@ -126,14 +200,17 @@ class McpService:
                 {
                     "supportedVersions": [self.settings.protocol_version],
                     "capabilities": {"tools": {"listChanged": False}},
-                    "instructions": "WEEX local MCP tools for Broker OAuth, public market data, read-only account queries, and stateless preview/confirm trading.",
+                    "instructions": self._instructions(),
                     "cacheScope": "public",
                     "ttlMs": 300_000,
                     "_meta": {
                         "io.modelcontextprotocol/serverInfo": {
                             "name": self.settings.server_name,
                             "version": self.settings.server_version,
-                        }
+                        },
+                        "com.weex/mcp": {
+                            "compatibility": self.compatibility_manifest,
+                        },
                     },
                 },
                 protocol_version=active_protocol_version,
@@ -149,7 +226,7 @@ class McpService:
                             "name": self.settings.server_name,
                             "version": self.settings.server_version,
                         },
-                        "instructions": "WEEX MCP tools for Broker OAuth, public market data, read-only account queries, and stateless preview/confirm trading.",
+                        "instructions": self._instructions(),
                     },
                     protocol_version=active_protocol_version,
                 )
@@ -161,13 +238,7 @@ class McpService:
         if method == "notifications/initialized":
             return self._jsonrpc_result(request_id, {}, protocol_version=active_protocol_version)
         if method == "tools/list":
-            tools = self.registry.list_tools()
-            if not self.settings.trade_enabled:
-                tools = [
-                    tool
-                    for tool in tools
-                    if tool["_meta"]["com.weex/mcp"]["module"] != "trade"
-                ]
+            tools = self._effective_tools()
             result: dict[str, Any] = {"tools": tools}
             if not is_legacy:
                 result.update({"cacheScope": "public", "ttlMs": 300_000})
@@ -214,7 +285,11 @@ class McpService:
         if raw_arguments is None:
             arguments: dict[str, Any] = {}
         elif not isinstance(raw_arguments, dict):
-            return error_response("invalid_arguments", "Tool arguments must be an object.")
+            return self._with_confirm_not_sent(
+                name,
+                {},
+                error_response("invalid_arguments", "Tool arguments must be an object."),
+            )
         else:
             arguments = raw_arguments
         if not isinstance(name, str) or not self.registry.has_tool(name):
@@ -228,32 +303,69 @@ class McpService:
                 tool,
                 arguments,
                 context,
-                error_response(
+                self._with_confirm_not_sent(
+                    name,
+                    arguments,
+                    error_response(
                     "module_disabled",
                     "Trade module is disabled.",
                     audit=context.audit_dict() if context is not None else None,
+                    ),
                 ),
             )
-        if tool.module in {"account", "trade"} and context is None:
+        if tool.module in {"account", "partner", "trade"} and context is None:
             return self._finish_tool(
                 tool,
                 arguments,
                 context,
-                error_response("unauthorized", "Tenant context is required for this tool."),
+                self._with_confirm_not_sent(
+                    name,
+                    arguments,
+                    error_response("unauthorized", "Tenant context is required for this tool."),
+                ),
             )
 
         try:
             validate_tool_arguments(arguments, tool.input_schema, defer_conditional=True)
         except SchemaValidationError as exc:
-            return self._finish_tool(tool, arguments, context, error_response("invalid_arguments", str(exc), details=exc.details))
+            return self._finish_tool(
+                tool,
+                arguments,
+                context,
+                self._with_confirm_not_sent(
+                    name,
+                    arguments,
+                    error_response("invalid_arguments", str(exc), details=exc.details),
+                ),
+            )
 
         result = self._dispatch_tool(name, arguments, context)
         return self._finish_tool(tool, arguments, context, result)
 
+    @staticmethod
+    def _with_confirm_not_sent(
+        name: Any,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        outcome = (
+            not_sent_outcome_for_confirm(name, arguments, include_items=True)
+            if isinstance(name, str)
+            else None
+        )
+        if outcome is not None and "outcome" not in result:
+            result = dict(result)
+            result["outcome"] = outcome
+        return result
+
     def _dispatch_tool(self, name: str, arguments: dict[str, Any], context: TenantContext | None) -> dict[str, Any]:
         if name == "broker_oauth_generate_authorization_url":
+            if self.broker_oauth_adapter is None:
+                return error_response("adapter_not_configured", "Broker OAuth adapter is not configured.")
             return generate_authorization_url(arguments, adapter=self.broker_oauth_adapter)
         if name == "broker_oauth_exchange_code_for_api_key":
+            if self.broker_oauth_adapter is None:
+                return error_response("adapter_not_configured", "Broker OAuth adapter is not configured.")
             return exchange_code_for_api_key(arguments, adapter=self.broker_oauth_adapter)
         if name == "market_get_symbol_price":
             return get_symbol_price(arguments, adapter=self.market_adapter)
@@ -263,6 +375,10 @@ class McpService:
             return get_klines(arguments, adapter=self.market_adapter)
         if name == "market_get_exchange_info":
             return get_exchange_info(arguments, adapter=self.market_adapter)
+        if name == "market_get_server_time":
+            return get_server_time(arguments, adapter=self.market_adapter)
+        if name == "market_ping":
+            return ping(arguments, adapter=self.market_adapter)
         if name == "market_get_ticker_24h":
             return get_ticker_24h(arguments, adapter=self.market_adapter)
         if name == "market_get_book_ticker":
@@ -285,6 +401,8 @@ class McpService:
             return get_balance(arguments, context, adapter=self.account_adapter)
         if name == "account_get_positions":
             return get_positions(arguments, context, adapter=self.account_adapter)
+        if name == "account_get_position":
+            return get_position(arguments, context, adapter=self.account_adapter)
         if name == "account_get_orders":
             return get_orders(arguments, context, adapter=self.account_adapter)
         if name == "account_get_trades":
@@ -301,6 +419,23 @@ class McpService:
             return get_conditional_orders(arguments, context, adapter=self.account_adapter)
         if name == "account_get_transfer_records":
             return get_transfer_records(arguments, context, adapter=self.account_adapter)
+        if name.startswith("partner_"):
+            if self.partner_adapter is None:
+                return error_response("adapter_not_configured", "Partner adapter is not configured.")
+            if name == "partner_get_affiliate_uids":
+                return get_affiliate_uids(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_get_channel_user_trade_and_asset":
+                return get_channel_user_trade_and_asset(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_get_affiliate_commission":
+                return get_affiliate_commission(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_query_sub_channel_transactions":
+                return query_sub_channel_transactions(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_verify_referrals":
+                return verify_referrals(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_get_referral_assets":
+                return get_referral_assets(arguments, context, adapter=self.partner_adapter)
+            if name == "partner_get_referral_deal_data":
+                return get_referral_deal_data(arguments, context, adapter=self.partner_adapter)
         if name == "trade_preview_order":
             return preview_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
         if name == "trade_preview_cancel_order":
@@ -310,28 +445,30 @@ class McpService:
         if name == "trade_preview_margin_mode":
             return preview_margin_mode(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
         if name == "trade_confirm_order":
-            return confirm_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
+            return confirm_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter, execution_authorizer=self.execution_authorizer)
         if name == "trade_confirm_cancel_order":
-            return confirm_cancel_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
+            return confirm_cancel_order(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter, execution_authorizer=self.execution_authorizer)
         if name == "trade_confirm_leverage":
-            return confirm_leverage(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
+            return confirm_leverage(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter, execution_authorizer=self.execution_authorizer)
         if name == "trade_confirm_margin_mode":
-            return confirm_margin_mode(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter)
-        for phase, handler in (("trade_preview_", preview_mutation), ("trade_confirm_", confirm_mutation)):
-            if name.startswith(phase):
-                action = name.removeprefix(phase)
-                if action in {
-                    "batch_order",
-                    "batch_cancel",
-                    "cancel_scope",
-                    "conditional_order",
-                    "conditional_cancel",
-                    "tp_sl",
-                    "close_positions",
-                    "position_margin",
-                    "auto_append_margin",
-                }:
-                    return handler(
+            return confirm_margin_mode(arguments, context=context, trade_enabled=self.settings.trade_enabled, approval_codec=self.approval_codec, adapter=self.trade_adapter, execution_authorizer=self.execution_authorizer)
+        for phase in ("trade_preview_", "trade_confirm_"):
+            if not name.startswith(phase):
+                continue
+            action = name.removeprefix(phase)
+            if action in {
+                "batch_order",
+                "batch_cancel",
+                "cancel_scope",
+                "conditional_order",
+                "conditional_cancel",
+                "tp_sl",
+                "close_positions",
+                "position_margin",
+                "auto_append_margin",
+            }:
+                if phase == "trade_preview_":
+                    return preview_mutation(
                         arguments,
                         action=action,
                         context=context,
@@ -339,10 +476,19 @@ class McpService:
                         approval_codec=self.approval_codec,
                         adapter=self.trade_adapter,
                     )
+                return confirm_mutation(
+                    arguments,
+                    action=action,
+                    context=context,
+                    trade_enabled=self.settings.trade_enabled,
+                    approval_codec=self.approval_codec,
+                    adapter=self.trade_adapter,
+                    execution_authorizer=self.execution_authorizer,
+                )
         return error_response("unknown_tool", "Unknown tool.")
 
     def _finish_tool(self, tool: ToolDefinition, arguments: dict[str, Any], context: TenantContext | None, result: dict[str, Any]) -> dict[str, Any]:
-        if tool.module not in {"account", "broker", "trade"}:
+        if tool.module not in {"account", "broker", "partner", "trade"}:
             return result
         event: dict[str, Any] = {
             "tool_name": tool.name,
@@ -370,11 +516,16 @@ def build_default_service(
     *,
     settings: Settings | None = None,
     trade_enabled: bool | None = None,
+    runtime_profile: str = "default",
+    registry: ToolRegistry | None = None,
+    approval_binding: Mapping[str, Any] | None = None,
     market_adapter: MarketPriceAdapter | None = None,
     broker_oauth_adapter: BrokerOAuthAdapter | None = None,
     account_adapter: AccountAdapter | None = None,
+    partner_adapter: PartnerAdapter | None = None,
     secret_provider: SecretProvider | None = None,
     trade_adapter: TradeGuardAdapter | None = None,
+    execution_authorizer: ExecutionAuthorizer | None = None,
     audit_sink: AuditSink | None = None,
 ) -> McpService:
     if trade_enabled is not None and not isinstance(trade_enabled, bool):
@@ -383,6 +534,7 @@ def build_default_service(
         settings = Settings(trade_enabled=bool(trade_enabled))
     elif trade_enabled is not None and trade_enabled != settings.trade_enabled:
         settings = replace(settings, trade_enabled=trade_enabled)
+    active_registry = registry or build_default_registry()
     active_secret_provider = secret_provider or RequestSecretProvider()
     active_market_adapter: MarketPriceAdapter
     if market_adapter is not None:
@@ -410,17 +562,36 @@ def build_default_service(
     active_audit_sink = audit_sink
     if active_audit_sink is None:
         active_audit_sink = FileAuditSink(settings.audit_log_file) if settings.audit_log_file else LoggingAuditSink()
+    active_broker_oauth_adapter = broker_oauth_adapter
+    if active_broker_oauth_adapter is None and any(
+        active_registry.has_tool(name)
+        for name in (
+            "broker_oauth_generate_authorization_url",
+            "broker_oauth_exchange_code_for_api_key",
+        )
+    ):
+        active_broker_oauth_adapter = WeexBrokerOAuthAdapter(timeout_seconds=settings.account_timeout_seconds)
+    active_partner_adapter = partner_adapter
+    if active_partner_adapter is None and any(
+        tool["_meta"]["com.weex/mcp"]["module"] == "partner"
+        for tool in active_registry.list_tools()
+    ):
+        active_partner_adapter = WeexPartnerRestAdapter(
+            secret_provider=active_secret_provider,
+            base_url=settings.spot_base_url,
+        )
 
     return McpService(
         settings=settings,
-        registry=build_default_registry(),
+        runtime_profile=runtime_profile,
+        registry=active_registry,
         approval_codec=ApprovalTokenCodec(
             secret=settings.approval_token_secret or secrets.token_urlsafe(48),
             ttl_seconds=settings.approval_token_ttl_seconds,
+            binding=approval_binding,
         ),
         market_adapter=active_market_adapter,
-        broker_oauth_adapter=broker_oauth_adapter
-        or WeexBrokerOAuthAdapter(timeout_seconds=settings.account_timeout_seconds),
+        broker_oauth_adapter=active_broker_oauth_adapter,
         account_adapter=account_adapter
         or WeexAccountRestAdapter(
             secret_provider=active_secret_provider,
@@ -428,6 +599,8 @@ def build_default_service(
             futures_base_url=settings.futures_base_url,
             timeout_seconds=settings.account_timeout_seconds,
         ),
+        partner_adapter=active_partner_adapter,
         trade_adapter=active_trade_adapter,
+        execution_authorizer=execution_authorizer or FailClosedExecutionAuthorizer(),
         audit_sink=active_audit_sink,
     )

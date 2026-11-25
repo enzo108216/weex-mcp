@@ -3,9 +3,9 @@
 <!-- mcp-name: io.github.weex-labs/weex-mcp -->
 
 WEEX MCP is a Python 3.11+ implementation of Model Context Protocol (MCP)
-tools for WEEX market data, account information, and controlled trade
-execution. The package supports both local integration and a standalone HTTP
-service while maintaining the same tool definitions and request contracts.
+tools for WEEX market data, account information, Partner reads, and controlled
+trade execution. The package supports default, Local User, and Broker Server
+runtime profiles across embedded, stdio, and HTTP transports.
 
 The core package has no mandatory runtime dependencies. Optional dependencies
 are provided for the standalone ASGI server and development verification.
@@ -29,10 +29,13 @@ are provided for the standalone ASGI server and development verification.
 
 ## Capabilities
 
-- 49 typed tools covering Broker OAuth, public Market data, read-only Account
-  data, and guarded Trade operations (2 Broker, 11 Market, 10 Account, and 26
-  Trade tools).
-- Local stdio transport for MCP client integration.
+- The default and Broker Server profiles expose 26 tools with Trade off and 52
+  with Trade on: 2 Broker, 13 Market, 11 Account, and 26 guarded Trade tools.
+- The Local User profile exposes 31 tools with Trade off and 57 with Trade on:
+  13 Market, 11 Account, 7 Local-only Partner, and 26 Trade tools. It never
+  exposes Broker OAuth.
+- Stdio transport for MCP client integration and embedded composition roots for
+  profile-bound hosts.
 - Embeddable service and ASGI application factories for host applications.
 - Standalone Streamable HTTP deployment through Uvicorn.
 - Strict JSON Schema validation for tool arguments. Output schemas are
@@ -40,16 +43,21 @@ are provided for the standalone ASGI server and development verification.
   conformance tests.
 - Request-scoped credential handling without credential persistence.
 - Stateless, signed preview IDs for two-phase trade execution.
-- Redacted audit metadata for authenticated account and trade operations.
+- Redacted audit metadata for authenticated Account, Partner, Broker, and Trade
+  operations.
 
 Trade operations are disabled by default and must be enabled explicitly. The
 service does not persist API credentials, approval state, idempotency results,
 or user sessions.
-When Trade is disabled, its 26 tools are omitted from `tools/list`; direct
-calls still fail closed with `module_disabled`. Explicit enablement exposes the
-full 49-tool catalog.
+When Trade is disabled, its 26 tools are omitted from `tools/list`; direct calls
+still fail closed with `module_disabled`. Selecting a runtime profile does not
+enable Trade.
 
 ## Installation
+
+The source tree is prepared as version `0.2.0`, but that version is currently
+unpublished. Installation from an index is valid only after separate release
+authorization publishes the verified artifact.
 
 Install the published core package:
 
@@ -68,7 +76,7 @@ Source checkout and editable development installation are covered in
 
 ## Runtime modes
 
-### Local stdio transport
+### Default stdio transport
 
 Start the newline-delimited JSON-RPC stdio server:
 
@@ -77,8 +85,9 @@ weex-mcp stdio
 ```
 
 An MCP client can register `weex-mcp` as the command and `stdio` as its
-argument. Protocol responses are written to standard output; diagnostics are
-written to standard error.
+argument. This entry point uses the `default` runtime profile. Protocol
+responses are written to standard output; diagnostics are written to standard
+error.
 
 ### Embedded service
 
@@ -102,6 +111,22 @@ app = build_asgi_app(service=service)
 
 Explicit `Settings` should be supplied when multiple application instances
 must share protocol, authentication, or approval-token configuration.
+
+### Local User composition
+
+An embedding host that owns a selected local profile and Vault resolver uses
+`weex_mcp.local.build_local_user_service`. Local User accepts only
+`credential_ref`, includes the seven read-only Partner tools, excludes Broker
+OAuth, and enables delegated authorization fields only when Trade tools are
+enabled. The host remains responsible for resolving refs without placing
+plaintext credentials in MCP arguments.
+
+### Broker Server composition
+
+`weex-mcp serve` uses the `broker_server` runtime profile. Broker Server accepts
+request-scoped `plaintext` credentials, includes the two Broker OAuth tools,
+excludes Partner, and keeps Trade confirmation interactive. Service bearer
+authentication is separate from the WEEX credential in a tool call.
 
 ### Standalone HTTP service
 
@@ -255,13 +280,25 @@ user session state. `server/discover` belongs to the current contract and
 therefore advertises `2026-07-28`; the two older versions are compatibility
 modes reached through `initialize`, not additional current discovery targets.
 
+Every current or legacy `server/discover` response also includes
+`_meta["com.weex/mcp"].compatibility`. Hosts should use this manifest as a
+startup preflight before sending requests. It identifies the package and tool
+contract versions, runtime profile, effective tool names, credential modes,
+delegated-authorization availability, and effective modules. `tool_set_digest`
+hashes only the sorted tool names; `schema_digest` hashes the sorted tool input
+and output schemas; `manifest_digest` binds the complete manifest except for
+itself. These digests deliberately exclude top-level tool titles,
+descriptions, discovery instructions, cache TTLs, request IDs, origins, and
+credentials.
+
 ## Tool catalog
 
 | Module | Tools | Access model |
 | --- | --- | --- |
 | Broker (2) | `broker_oauth_generate_authorization_url`, `broker_oauth_exchange_code_for_api_key` | Stateless merchant-supplied OAuth context; successful responses intentionally contain sensitive values |
-| Market (11) | `market_get_symbol_price`, `market_get_depth`, `market_get_klines`, `market_get_exchange_info`, `market_get_ticker_24h`, `market_get_book_ticker`, `market_get_recent_trades`, `market_get_funding_rate`, `market_get_open_interest`, `market_get_advanced_klines`, `market_get_catalog` | Public market data |
-| Account (10) | `account_get_balance`, `account_get_positions`, `account_get_orders`, `account_get_trades`, `account_get_bills`, `account_get_config`, `account_get_commission_rate`, `account_get_symbol_config`, `account_get_conditional_orders`, `account_get_transfer_records` | Request-scoped `USER_DATA` credential |
+| Market (13) | `market_get_symbol_price`, `market_get_server_time`, `market_ping`, `market_get_depth`, `market_get_klines`, `market_get_exchange_info`, `market_get_ticker_24h`, `market_get_book_ticker`, `market_get_recent_trades`, `market_get_funding_rate`, `market_get_open_interest`, `market_get_advanced_klines`, `market_get_catalog` | Public market data |
+| Account (11) | `account_get_balance`, `account_get_position`, `account_get_positions`, `account_get_orders`, `account_get_trades`, `account_get_bills`, `account_get_config`, `account_get_commission_rate`, `account_get_symbol_config`, `account_get_conditional_orders`, `account_get_transfer_records` | Request-scoped `USER_DATA` credential |
+| Partner (7, Local User only) | `partner_get_affiliate_uids`, `partner_get_channel_user_trade_and_asset`, `partner_get_affiliate_commission`, `partner_query_sub_channel_transactions`, `partner_verify_referrals`, `partner_get_referral_assets`, `partner_get_referral_deal_data` | `credential_ref`, read-only allowlist, no automatic retry |
 | Trade (26) | Existing order/cancel/leverage/margin-mode pairs plus `batch_order`, `batch_cancel`, `cancel_scope`, `conditional_order`, `conditional_cancel`, `tp_sl`, `close_positions`, `position_margin`, and `auto_append_margin` preview/confirm pairs | Explicit enablement and two-phase confirmation |
 
 Every tool publishes an input schema, output schema, client-facing title,
@@ -270,8 +307,11 @@ before an adapter operation is executed.
 
 ## Credential handling
 
-Account and trade requests may provide a complete WEEX credential in the tool
-arguments:
+The accepted credential shape is a runtime-profile contract. Broker Server
+accepts a complete request-scoped `plaintext` credential. Local User accepts
+only `credential_ref`. The default profile advertises all three core schema
+variants (`credential_ref`, `encrypted_envelope`, and `plaintext`) for hosts
+that inject the matching resolver. A plaintext example is:
 
 ```python
 credential = {
@@ -291,7 +331,7 @@ must use TLS and must disable request and response body capture in proxies,
 application monitoring, tracing, and error-reporting systems.
 
 When `WEEX_AUDIT_LOG_FILE` is set, the default service appends local audit
-records as JSON Lines. Each line is one redacted Account, Broker, or Trade tool event
+records as JSON Lines. Each line is one redacted Account, Broker, Partner, or Trade tool event
 with fields such as tool name, module, success status, request identity, and
 credential fingerprint; raw API keys, secrets, passphrases, and credential refs
 are not written. The Docker Compose configuration sets this variable to
@@ -300,9 +340,10 @@ are not written. The Docker Compose configuration sets this variable to
 events are emitted through the `weex_mcp.audit` Python logger instead of being
 written by the MCP to a file.
 
-The `credential_ref` and `encrypted_envelope` forms remain extension points
-for hosts that provide a compatible secret resolver. Tenant, user, and session
-headers are optional; absent values resolve to an anonymous internal context.
+The `encrypted_envelope` form remains an extension point for a compatible
+default-profile host; it is not advertised by Local User or Broker Server.
+Tenant, user, and session headers are optional; absent values resolve to an
+anonymous internal context.
 
 ## Broker OAuth
 

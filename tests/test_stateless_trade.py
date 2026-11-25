@@ -9,18 +9,16 @@ class StatelessTradeAdapter:
         self.execute_actions = []
 
     def resolve_credential(self, *, credential_argument, context):
-        from weex_mcp.audit import make_fingerprint
-        from weex_mcp.secret_provider import ResolvedWeexCredential
+        from dataclasses import replace
 
-        api_key = credential_argument["api_key"]
-        return ResolvedWeexCredential(
-            key_id="request",
-            api_key=api_key,
-            api_secret=credential_argument["api_secret"],
-            api_passphrase=credential_argument["api_passphrase"],
-            permissions=frozenset(["TRADE"]),
-            fingerprint=make_fingerprint("resolved_weex_api_key", api_key),
+        from weex_mcp.secret_provider import PlaintextSecretProvider
+
+        resolved = PlaintextSecretProvider().resolve(
+            credential_argument=credential_argument,
+            context=context,
+            required_permission="TRADE",
         )
+        return replace(resolved, permissions=frozenset(["TRADE"]))
 
     def _preview(self, action, arguments, *, binding_name, binding):
         self.preview_calls += 1
@@ -69,6 +67,27 @@ class StatelessTradeAdapter:
         return self._confirm("cancel_order")
 
     def preview_leverage(self, *, arguments, credential, credential_argument, context):
+        explicit_fields = {
+            "cross_leverage": "crossLeverage",
+            "isolated_long_leverage": "isolatedLongLeverage",
+            "isolated_short_leverage": "isolatedShortLeverage",
+        }
+        if any(field in arguments for field in explicit_fields):
+            if "leverage" in arguments or "position_side" in arguments:
+                raise ValueError(
+                    "Explicit leverage fields cannot be combined with leverage or position_side."
+                )
+            body = {"symbol": arguments["symbol"]}
+            if "margin_mode" in arguments:
+                body["marginType"] = arguments["margin_mode"]
+            for source, target in explicit_fields.items():
+                if source in arguments:
+                    body[target] = arguments[source]
+            result = self._preview(
+                "update_leverage", arguments, binding_name="request_body", binding=body
+            )
+            result["summary"]["leverage_mode"] = "explicit_atomic"
+            return result
         body = {
             "symbol": arguments["symbol"],
             "marginType": arguments["margin_mode"],
@@ -88,12 +107,12 @@ class StatelessTradeAdapter:
 
 
 class StatelessTradeTests(unittest.TestCase):
-    def _credential(self, api_key="AK_ONE"):
+    def _credential(self, api_key="AK_ONE", api_secret="SK_INLINE", api_passphrase="PP_INLINE"):
         return {
             "type": "plaintext",
             "api_key": api_key,
-            "api_secret": "SK_INLINE",
-            "api_passphrase": "PP_INLINE",
+            "api_secret": api_secret,
+            "api_passphrase": api_passphrase,
         }
 
     def _order(self):
@@ -303,6 +322,77 @@ class StatelessTradeTests(unittest.TestCase):
         self.assertEqual(changed_credential["error"]["code"], "approval_mismatch")
         self.assertEqual(adapter.execute_calls, 0)
 
+        for credential in (
+            self._credential(api_secret="SK_CHANGED"),
+            self._credential(api_passphrase="PP_CHANGED"),
+        ):
+            with self.subTest(credential=credential):
+                changed_credential_version = self._call(
+                    service,
+                    "trade_confirm_order",
+                    arguments
+                    | {
+                        "credential": credential,
+                        "preview_id": preview["preview_id"],
+                        "confirmation": {"accepted": True},
+                    },
+                )
+                self.assertFalse(changed_credential_version["ok"])
+                self.assertEqual(changed_credential_version["error"]["code"], "approval_mismatch")
+                self.assertEqual(adapter.execute_calls, 0)
+
+    def test_approval_binding_allows_same_route_and_rejects_host_or_route_change(self):
+        from weex_mcp.service import build_default_service
+        from weex_mcp.settings import Settings
+
+        settings = Settings(trade_enabled=True, approval_token_secret="s" * 32)
+        local_binding = {"host_kind": "local_user", "route_fingerprint": "fp_route_a"}
+        try:
+            preview_service = build_default_service(
+                settings=settings,
+                approval_binding=local_binding,
+                trade_adapter=StatelessTradeAdapter(),
+            )
+        except TypeError as exc:
+            self.fail(f"service approval binding support is missing: {exc}")
+        matching_adapter = StatelessTradeAdapter()
+        matching_service = build_default_service(
+            settings=settings,
+            approval_binding={"route_fingerprint": "fp_route_a", "host_kind": "local_user"},
+            trade_adapter=matching_adapter,
+        )
+        arguments = self._order()
+        preview = self._call(preview_service, "trade_preview_order", arguments)
+
+        confirmed = self._call(
+            matching_service,
+            "trade_confirm_order",
+            arguments | {"preview_id": preview["preview_id"], "confirmation": {"accepted": True}},
+        )
+        self.assertTrue(confirmed["ok"])
+        self.assertEqual(matching_adapter.execute_calls, 1)
+
+        for binding in (
+            {"host_kind": "broker_server", "route_fingerprint": "fp_route_a"},
+            {"host_kind": "local_user", "route_fingerprint": "fp_route_b"},
+        ):
+            with self.subTest(binding=binding):
+                rejected_adapter = StatelessTradeAdapter()
+                rejected_service = build_default_service(
+                    settings=settings,
+                    approval_binding=binding,
+                    trade_adapter=rejected_adapter,
+                )
+                rejected = self._call(
+                    rejected_service,
+                    "trade_confirm_order",
+                    arguments | {"preview_id": preview["preview_id"], "confirmation": {"accepted": True}},
+                )
+                self.assertFalse(rejected["ok"])
+                self.assertEqual(rejected["error"]["code"], "approval_token_invalid")
+                self.assertEqual(rejected_adapter.preview_calls, 0)
+                self.assertEqual(rejected_adapter.execute_calls, 0)
+
     def test_shared_secret_allows_cross_instance_confirm_and_rotation_fails_closed(self):
         from weex_mcp.service import build_default_service
         from weex_mcp.settings import Settings
@@ -402,6 +492,121 @@ class StatelessTradeTests(unittest.TestCase):
                 self.assertTrue(confirmed["ok"])
                 self.assertEqual(adapter.preview_actions, [action, action])
                 self.assertEqual(adapter.execute_actions, [action])
+
+    def test_explicit_atomic_leverage_preview_token_binds_every_field(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        arguments = {
+            "market": "futures",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "cross_leverage": "2",
+            "isolated_long_leverage": "3",
+            "credential": self._credential(),
+        }
+        preview = self._call(service, "trade_preview_leverage", arguments)
+        self.assertTrue(preview["ok"])
+
+        tampered = self._call(
+            service,
+            "trade_confirm_leverage",
+            arguments
+            | {
+                "isolated_long_leverage": "4",
+                "preview_id": preview["preview_id"],
+                "confirmation": {"accepted": True},
+            },
+        )
+        self.assertFalse(tampered["ok"])
+        self.assertEqual(tampered["error"]["code"], "approval_mismatch")
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_leverage_missing_fields_are_deferred_to_preview_and_confirm_tools(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        base = {
+            "market": "futures",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "credential": self._credential(),
+        }
+        missing_preview = self._call(service, "trade_preview_leverage", base)
+        self.assertFalse(missing_preview["ok"])
+        self.assertEqual(missing_preview["error"]["code"], "missing_fields")
+        self.assertEqual(
+            missing_preview["error"]["details"]["fields"],
+            ["margin_mode", "leverage"],
+        )
+        self.assertTrue(missing_preview["clarification_required"])
+        self.assertEqual(adapter.preview_calls, 0)
+
+        valid = base | {"margin_mode": "cross", "leverage": "5"}
+        preview = self._call(service, "trade_preview_leverage", valid)
+        self.assertTrue(preview["ok"])
+        missing_confirm = self._call(
+            service,
+            "trade_confirm_leverage",
+            base
+            | {
+                "margin_mode": "cross",
+                "preview_id": preview["preview_id"],
+                "confirmation": {"accepted": True},
+            },
+        )
+        self.assertFalse(missing_confirm["ok"])
+        self.assertEqual(missing_confirm["error"]["code"], "missing_fields")
+        self.assertEqual(missing_confirm["error"]["details"]["fields"], ["leverage"])
+        self.assertEqual(missing_confirm["outcome"]["class"], "not_sent")
+        self.assertFalse(missing_confirm["outcome"]["write_attempted"])
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_leverage_mixed_modes_reach_adapter_validation_without_mutation(self):
+        from weex_mcp.service import build_default_service
+
+        adapter = StatelessTradeAdapter()
+        service = build_default_service(trade_enabled=True, trade_adapter=adapter)
+        base = {
+            "market": "futures",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "cross_leverage": "2",
+            "credential": self._credential(),
+        }
+        mixed_preview = self._call(
+            service,
+            "trade_preview_leverage",
+            base | {"leverage": "5"},
+        )
+        self.assertFalse(mixed_preview["ok"])
+        self.assertEqual(mixed_preview["error"]["code"], "invalid_arguments")
+        self.assertEqual(
+            mixed_preview["error"]["message"],
+            "Explicit leverage fields cannot be combined with leverage or position_side.",
+        )
+
+        preview = self._call(service, "trade_preview_leverage", base)
+        mixed_confirm = self._call(
+            service,
+            "trade_confirm_leverage",
+            base
+            | {
+                "leverage": "5",
+                "preview_id": preview["preview_id"],
+                "confirmation": {"accepted": True},
+            },
+        )
+        self.assertFalse(mixed_confirm["ok"])
+        self.assertEqual(mixed_confirm["error"]["code"], "invalid_arguments")
+        self.assertEqual(
+            mixed_confirm["error"]["message"],
+            "Explicit leverage fields cannot be combined with leverage or position_side.",
+        )
+        self.assertEqual(mixed_confirm["outcome"]["class"], "not_sent")
+        self.assertEqual(adapter.execute_calls, 0)
 
     def test_wrong_action_tampering_and_invalid_confirmation_arguments_fail_before_execution(self):
         from weex_mcp.service import build_default_service

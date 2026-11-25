@@ -105,7 +105,7 @@ class BrokerOAuthRegistryTests(unittest.TestCase):
 
         tools = {tool["name"]: tool for tool in build_default_registry().list_tools()}
 
-        self.assertEqual(len(tools), 49)
+        self.assertEqual(len(tools), 52)
         self.assertIn("broker_oauth_generate_authorization_url", tools)
         self.assertIn("broker_oauth_exchange_code_for_api_key", tools)
 

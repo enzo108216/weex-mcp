@@ -185,6 +185,97 @@ class AccountAdapterTests(unittest.TestCase):
         self.assertEqual(captured["query"], {})
         self.assertEqual(result["positions"], [{"symbol": "BTCUSDT", "size": "1"}])
 
+    def test_single_position_uses_exact_user_data_endpoint_and_positions_envelope(self):
+        from weex_mcp.adapters.account import WeexAccountRestAdapter
+        from weex_mcp.tenant_context import TenantContext
+
+        captured = {}
+
+        def fake_transport(prepared, timeout_seconds):
+            captured.update(prepared)
+            return b'[{"symbol":"BTCUSDT","positionAmt":"1"}]'
+
+        adapter = WeexAccountRestAdapter(secret_provider=FakeSecretProvider(), transport=fake_transport)
+        result = adapter.get_position(
+            market="futures",
+            trading_mode="live",
+            symbol="btc/usdt",
+            credential_argument={"type": "credential_ref", "ref": "credref_a", "key_id": "key_a"},
+            context=TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a"),
+        )
+
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(captured["query"], {"symbol": "BTCUSDT"})
+        self.assertEqual(
+            captured["url"],
+            "https://api-contract.weex.com/capi/v3/account/position/singlePosition?symbol=BTCUSDT",
+        )
+        self.assertEqual(result["market"], "futures")
+        self.assertEqual(result["trading_mode"], "live")
+        self.assertEqual(result["symbol"], "BTCUSDT")
+        self.assertEqual(result["positions"], [{"symbol": "BTCUSDT", "positionAmt": "1"}])
+        self.assertEqual(result["endpoint"], "account.get_single_position")
+        self.assertEqual(result["raw"], [{"symbol": "BTCUSDT", "positionAmt": "1"}])
+
+        empty = WeexAccountRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            transport=lambda prepared, timeout: b"[]",
+        ).get_position(
+            market="futures",
+            trading_mode="live",
+            symbol="BTCUSDT",
+            credential_argument={"type": "credential_ref", "ref": "credref_a", "key_id": "key_a"},
+            context=TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a"),
+        )
+        self.assertEqual(empty["positions"], [])
+
+    def test_single_position_rejects_unsupported_modes_and_untrusted_response_identity(self):
+        from weex_mcp.adapters.account import WeexAccountRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.tenant_context import TenantContext
+
+        context = TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a")
+        credential = {"type": "credential_ref", "ref": "credref_a", "key_id": "key_a"}
+        requests = []
+        adapter = WeexAccountRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            transport=lambda prepared, timeout: requests.append(prepared) or b"[]",
+        )
+        for market, trading_mode in (("spot", "live"), ("futures", "demo")):
+            with self.subTest(market=market, trading_mode=trading_mode):
+                with self.assertRaises(ValueError):
+                    adapter.get_position(
+                        market=market,
+                        trading_mode=trading_mode,
+                        symbol="BTCUSDT",
+                        credential_argument=credential,
+                        context=context,
+                    )
+        self.assertEqual(requests, [])
+
+        invalid_bodies = (
+            b"{}",
+            b'{"data":{}}',
+            b'["BTCUSDT"]',
+            b'[{}]',
+            b'[{"symbol":"ETHUSDT"}]',
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body):
+                invalid_adapter = WeexAccountRestAdapter(
+                    secret_provider=FakeSecretProvider(),
+                    transport=lambda prepared, timeout, body=body: body,
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.get_position(
+                        market="futures",
+                        trading_mode="live",
+                        symbol="BTCUSDT",
+                        credential_argument=credential,
+                        context=context,
+                    )
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
     def test_demo_positions_normalize_simulated_symbols_before_filtering(self):
         from weex_mcp.adapters.account import WeexAccountRestAdapter
         from weex_mcp.tenant_context import TenantContext

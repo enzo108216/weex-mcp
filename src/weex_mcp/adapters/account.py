@@ -31,6 +31,7 @@ FUTURES_ACCOUNT_CONFIG_PATH = "/capi/v3/account/accountConfig"
 FUTURES_COMMISSION_RATE_PATH = "/capi/v3/account/commissionRate"
 FUTURES_SYMBOL_CONFIG_PATH = "/capi/v3/account/symbolConfig"
 FUTURES_POSITIONS_PATH = "/capi/v3/account/position/allPosition"
+FUTURES_POSITION_PATH = "/capi/v3/account/position/singlePosition"
 FUTURES_OPEN_ORDERS_PATH = "/capi/v3/openOrders"
 FUTURES_ORDER_HISTORY_PATH = "/capi/v3/order/history"
 FUTURES_ORDER_PATH = "/capi/v3/order"
@@ -71,6 +72,17 @@ class AccountAdapter(Protocol):
         credential_argument: dict[str, Any],
         context: TenantContext,
         symbol: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def get_position(
+        self,
+        *,
+        market: str,
+        trading_mode: str,
+        symbol: str,
+        credential_argument: dict[str, Any],
+        context: TenantContext,
     ) -> dict[str, Any]:
         ...
 
@@ -211,6 +223,51 @@ class WeexAccountRestAdapter:
                 if isinstance(item, dict) and str(item.get("symbol") or "").upper() == normalized_symbol
             ]
         return result
+
+    def get_position(
+        self,
+        *,
+        market: str,
+        trading_mode: str,
+        symbol: str,
+        credential_argument: dict[str, Any],
+        context: TenantContext,
+    ) -> dict[str, Any]:
+        normalized_market, normalized_mode = _require_live_futures_mode(market, trading_mode)
+        normalized_symbol = _normalize_symbol(symbol)
+        assert normalized_symbol is not None
+        credential = self.secret_provider.resolve(
+            credential_argument=credential_argument,
+            context=context,
+            required_permission="USER_DATA",
+        )
+        payload = self._signed_request(
+            market=normalized_market,
+            method="GET",
+            path=FUTURES_POSITION_PATH,
+            query={"symbol": normalized_symbol},
+            body={},
+            credential=credential,
+        )
+        positions = _extract_object_list_payload(payload, resource="positions")
+        if any(
+            _normalize_upstream_symbol(position.get("symbol"), payload=payload) != normalized_symbol
+            for position in positions
+        ):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX single-position response did not match symbol.",
+                payload=payload,
+            )
+        return {
+            "market": normalized_market,
+            "trading_mode": normalized_mode,
+            "symbol": normalized_symbol,
+            "positions": positions,
+            "source": "weex_private_rest",
+            "endpoint": "account.get_single_position",
+            "raw": payload,
+        }
 
     def get_orders(
         self,

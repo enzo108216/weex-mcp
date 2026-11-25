@@ -37,15 +37,26 @@ FUTURES_MARK_KLINES_PATH = "/capi/v3/market/markPriceKlines"
 SPOT_COINS_PATH = "/api/v3/coins"
 SPOT_API_SYMBOLS_PATH = "/api/v3/apiTradingSymbols"
 FUTURES_API_SYMBOLS_PATH = "/capi/v3/market/apiTradingSymbols"
+SPOT_SERVER_TIME_PATH = "/api/v3/time"
+FUTURES_SERVER_TIME_PATH = "/capi/v3/market/time"
+SPOT_PING_PATH = "/api/v3/ping"
 
 DEPTH_LIMITS = {"15", "200"}
 SPOT_KLINE_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w"}
 FUTURES_KLINE_INTERVALS = {"1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"}
 _DAY_MS = 24 * 60 * 60 * 1000
+_LONG_MAX = 9_223_372_036_854_775_807
 
 
 class MarketPriceAdapter(Protocol):
-    def get_symbol_price(self, *, market: str, symbol: str, price_type: str | None = None) -> dict[str, Any]:
+    def get_symbol_price(
+        self,
+        *,
+        market: str,
+        symbol: str | None = None,
+        symbols: list[str] | None = None,
+        price_type: str | None = None,
+    ) -> dict[str, Any]:
         ...
 
     def get_depth(self, *, market: str, symbol: str, limit: str | None = None) -> dict[str, Any]:
@@ -63,7 +74,20 @@ class MarketPriceAdapter(Protocol):
     ) -> dict[str, Any]:
         ...
 
-    def get_exchange_info(self, *, market: str, symbol: str | None = None) -> dict[str, Any]:
+    def get_exchange_info(
+        self,
+        *,
+        market: str,
+        symbol: str | None = None,
+        symbols: list[str] | None = None,
+        symbol_status: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def get_server_time(self, *, market: str) -> dict[str, Any]:
+        ...
+
+    def ping(self, *, market: str) -> dict[str, Any]:
         ...
 
     def get_ticker_24h(self, *, market: str, symbol: str | None = None) -> dict[str, Any]:
@@ -118,6 +142,30 @@ def normalize_market_symbol(symbol: str) -> str:
     return normalized
 
 
+def _normalize_symbol_list(symbols: list[str] | None) -> list[str]:
+    if not isinstance(symbols, list) or not symbols:
+        raise ValueError("symbols must be a non-empty array.")
+    if not all(isinstance(symbol, str) for symbol in symbols):
+        raise ValueError("symbols must contain only strings.")
+    normalized = [normalize_market_symbol(symbol) for symbol in symbols]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("symbols must contain unique symbols.")
+    return normalized
+
+
+def _normalize_symbol_status(symbol_status: str | None) -> str | None:
+    if symbol_status in (None, ""):
+        return None
+    normalized = str(symbol_status).strip().upper()
+    if normalized not in {"TRADING", "HALT", "BREAK"}:
+        raise ValueError("symbol_status must be TRADING, HALT, or BREAK.")
+    return normalized
+
+
+def _compact_json_array(values: list[str]) -> str:
+    return json.dumps(values, ensure_ascii=True, separators=(",", ":"))
+
+
 class WeexMarketRestAdapter:
     """WEEX public REST market adapter.
 
@@ -150,10 +198,77 @@ class WeexMarketRestAdapter:
         self.sleep_func = sleep_func or time.sleep
         self.time_func = time_func or time.time
 
-    def get_symbol_price(self, *, market: str, symbol: str, price_type: str | None = None) -> dict[str, Any]:
+    def get_symbol_price(
+        self,
+        *,
+        market: str,
+        symbol: str | None = None,
+        symbols: list[str] | None = None,
+        price_type: str | None = None,
+    ) -> dict[str, Any]:
         normalized_market = _normalize_market(market)
-        normalized_symbol = normalize_market_symbol(symbol)
+        has_symbol = symbol not in (None, "")
+        has_symbols = symbols is not None
+        if has_symbol and has_symbols:
+            raise ValueError("symbol and symbols are mutually exclusive.")
+        if normalized_market == "futures" and not has_symbol:
+            raise ValueError("Futures symbol price requires a single symbol.")
+        normalized_symbol = normalize_market_symbol(str(symbol)) if has_symbol else None
+        normalized_symbols = _normalize_symbol_list(symbols) if has_symbols else None
         normalized_price_type = _normalize_price_type(normalized_market, price_type)
+
+        if normalized_symbol is None:
+            query = (
+                {"symbols": _compact_json_array(normalized_symbols)}
+                if normalized_symbols is not None
+                else {}
+            )
+            raw = self._public_get(
+                market="spot",
+                path=SPOT_SYMBOL_PRICE_PATH,
+                query=query,
+            )
+            prices = _mapping_items(
+                _extract_payload(raw),
+                resource="symbol prices",
+                payload=raw,
+                allow_single=False,
+            )
+            if not prices:
+                raise WeexRestBusinessError(
+                    code="invalid_response",
+                    message="WEEX symbol-price response was empty.",
+                    payload=raw,
+                )
+            _require_mapping_fields(
+                prices,
+                fields=("symbol", "price"),
+                resource="symbol prices",
+                payload=raw,
+            )
+            _require_numeric_fields(
+                prices,
+                fields=("price",),
+                resource="symbol prices",
+                payload=raw,
+                allow_zero=False,
+            )
+            if normalized_symbols is None:
+                _require_unique_symbol_identities(prices, payload=raw)
+            else:
+                _require_exact_symbol_coverage(prices, normalized_symbols, payload=raw)
+            result = {
+                "market": "spot",
+                "prices": prices,
+                "source": "weex_public_rest",
+                "endpoint": "spot.market.get_ticker_info",
+                "raw": raw,
+            }
+            if normalized_symbols is not None:
+                result["symbols"] = normalized_symbols
+            return result
+
+        assert normalized_symbol is not None
         url = self._build_symbol_price_url(
             market=normalized_market,
             symbol=normalized_symbol,
@@ -261,34 +376,112 @@ class WeexMarketRestAdapter:
             "raw": raw,
         }
 
-    def get_exchange_info(self, *, market: str, symbol: str | None = None) -> dict[str, Any]:
+    def get_exchange_info(
+        self,
+        *,
+        market: str,
+        symbol: str | None = None,
+        symbols: list[str] | None = None,
+        symbol_status: str | None = None,
+    ) -> dict[str, Any]:
         normalized_market = _normalize_market(market)
+        if symbol not in (None, "") and symbols is not None:
+            raise ValueError("symbol and symbols are mutually exclusive.")
+        normalized_symbol = normalize_market_symbol(str(symbol)) if symbol not in (None, "") else None
+        normalized_symbols = _normalize_symbol_list(symbols) if symbols is not None else None
+        normalized_status = _normalize_symbol_status(symbol_status)
+        if normalized_market == "futures" and normalized_symbols is not None:
+            raise ValueError("Futures exchange info does not support symbols.")
+        if normalized_market == "futures" and normalized_status is not None:
+            raise ValueError("Futures exchange info does not support symbol_status.")
+
         path = SPOT_EXCHANGE_INFO_PATH if normalized_market == "spot" else FUTURES_EXCHANGE_INFO_PATH
         query: dict[str, str] = {}
-        if symbol:
-            query["symbol"] = normalize_market_symbol(symbol)
+        _put_if_present(query, "symbol", normalized_symbol)
+        if normalized_symbols is not None:
+            query["symbols"] = _compact_json_array(normalized_symbols)
+        _put_if_present(query, "symbolStatus", normalized_status)
         raw = self._public_get(market=normalized_market, path=path, query=query)
         payload = _extract_payload(raw)
-        symbols = _extract_symbols(payload)
-        if symbols is None:
+        response_symbols = _extract_symbols(payload)
+        if response_symbols is None:
             raise WeexRestBusinessError(
                 code="invalid_response",
                 message="WEEX exchange-info response did not contain symbol information.",
                 payload=raw,
             )
-        requested_symbol = query.get("symbol")
-        if requested_symbol is not None and not _contains_symbol(symbols, requested_symbol):
+        if normalized_symbol is not None and not _contains_symbol(response_symbols, normalized_symbol):
             raise WeexRestBusinessError(
                 code="invalid_response",
                 message="WEEX exchange-info response did not contain the requested symbol.",
                 payload=raw,
             )
-        return {
+        if normalized_symbols is not None and any(
+            not _contains_symbol(response_symbols, requested_symbol)
+            for requested_symbol in normalized_symbols
+        ):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX exchange-info response did not cover the requested symbols.",
+                payload=raw,
+            )
+        if normalized_status is not None and any(
+            not isinstance(item, dict) or item.get("status") != normalized_status
+            for item in response_symbols
+        ):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX exchange-info response did not match symbol_status.",
+                payload=raw,
+            )
+        result = {
             "market": normalized_market,
-            "symbol": requested_symbol,
-            "symbols": symbols,
+            "symbol": normalized_symbol,
+            "symbols": response_symbols,
             "source": "weex_public_rest",
             "endpoint": "spot.config.get_product_info" if normalized_market == "spot" else "market.get_contract_info",
+            "raw": raw,
+        }
+        if normalized_status is not None:
+            result["symbol_status"] = normalized_status
+        return result
+
+    def get_server_time(self, *, market: str) -> dict[str, Any]:
+        normalized_market = _normalize_market(market)
+        path = SPOT_SERVER_TIME_PATH if normalized_market == "spot" else FUTURES_SERVER_TIME_PATH
+        raw = self._public_get(market=normalized_market, path=path, query={})
+        payload = _extract_payload(raw)
+        if not isinstance(payload, dict):
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX server-time response was not an object.",
+                payload=raw,
+            )
+        server_time = _normalize_response_int64(payload.get("serverTime"), payload=raw)
+        return {
+            "market": normalized_market,
+            "server_time": server_time,
+            "source": "weex_public_rest",
+            "endpoint": "spot.config.get_server_time" if normalized_market == "spot" else "market.get_server_time",
+            "raw": raw,
+        }
+
+    def ping(self, *, market: str) -> dict[str, Any]:
+        normalized_market = _normalize_market(market)
+        if normalized_market != "spot":
+            raise ValueError("Ping only supports spot.")
+        raw = self._public_get(market="spot", path=SPOT_PING_PATH, query={})
+        if raw != {}:
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX ping response was not an empty object.",
+                payload=raw,
+            )
+        return {
+            "market": "spot",
+            "reachable": True,
+            "source": "weex_public_rest",
+            "endpoint": "spot.config.ping",
             "raw": raw,
         }
 
@@ -826,13 +1019,65 @@ def _require_requested_symbol(items: list[dict[str, Any]], requested_symbol: str
         raise WeexRestBusinessError(code="invalid_response", message="WEEX market response symbol did not match the requested symbol.", payload=payload)
 
 
+def _require_exact_symbol_coverage(
+    items: list[dict[str, Any]],
+    requested_symbols: list[str],
+    *,
+    payload: Any,
+) -> None:
+    response_symbols = _require_unique_symbol_identities(items, payload=payload)
+    if response_symbols != set(requested_symbols):
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX market response did not exactly cover the requested symbols.",
+            payload=payload,
+        )
+
+
+def _require_unique_symbol_identities(items: list[dict[str, Any]], *, payload: Any) -> set[str]:
+    response_symbols: set[str] = set()
+    for item in items:
+        symbol = _safe_normalize_response_symbol(item.get("symbol"))
+        if symbol is None or symbol in response_symbols:
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX market response contained an invalid or duplicate symbol identity.",
+                payload=payload,
+            )
+        response_symbols.add(symbol)
+    return response_symbols
+
+
 def _safe_normalize_response_symbol(value: Any) -> str | None:
-    if value in (None, ""):
+    if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return normalize_market_symbol(str(value))
+        return normalize_market_symbol(value)
     except ValueError:
         return None
+
+
+def _normalize_response_int64(value: Any, *, payload: Any) -> int:
+    if isinstance(value, bool):
+        parsed = -1
+    elif isinstance(value, int):
+        parsed = value
+    elif (
+        isinstance(value, str)
+        and value.isascii()
+        and value.isdigit()
+        and (len(value) == 1 or not value.startswith("0"))
+    ):
+        parsed = int(value)
+    else:
+        parsed = -1
+    if parsed < 0 or parsed > _LONG_MAX:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX server-time response contained an invalid serverTime.",
+            payload=payload,
+        )
+    return parsed
 
 
 def _valid_integer(value: Any, *, allow_zero: bool) -> bool:

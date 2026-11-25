@@ -62,10 +62,10 @@ class OmittedCapabilityRegistryTests(unittest.TestCase):
 
         return {tool["name"]: tool for tool in build_default_registry().list_tools()}
 
-    def test_registry_has_exact_49_target_tools(self):
+    def test_registry_has_exact_52_target_tools(self):
         tools = self._tools()
 
-        self.assertEqual(len(tools), 49)
+        self.assertEqual(len(tools), 52)
         self.assertTrue(BROKER_NEW.issubset(tools))
         self.assertTrue(MARKET_NEW.issubset(tools))
         self.assertTrue(ACCOUNT_NEW.issubset(tools))

@@ -2,6 +2,37 @@ import unittest
 
 
 class SecretProviderTests(unittest.TestCase):
+    def test_plaintext_fingerprint_changes_when_any_credential_field_changes(self):
+        from weex_mcp.secret_provider import PlaintextSecretProvider
+        from weex_mcp.tenant_context import TenantContext
+
+        provider = PlaintextSecretProvider()
+        context = TenantContext(tenant_id="mcp", user_id="anonymous", session_id="request")
+
+        def resolve(api_key: str, api_secret: str, api_passphrase: str):
+            return provider.resolve(
+                credential_argument={
+                    "type": "plaintext",
+                    "api_key": api_key,
+                    "api_secret": api_secret,
+                    "api_passphrase": api_passphrase,
+                },
+                context=context,
+                required_permission="USER_DATA",
+            )
+
+        fingerprints = {
+            resolve("AK", "SK", "PP").fingerprint,
+            resolve("AK_CHANGED", "SK", "PP").fingerprint,
+            resolve("AK", "SK_CHANGED", "PP").fingerprint,
+            resolve("AK", "SK", "PP_CHANGED").fingerprint,
+        }
+        self.assertEqual(len(fingerprints), 4)
+        for fingerprint in fingerprints:
+            self.assertNotIn("AK", fingerprint)
+            self.assertNotIn("SK", fingerprint)
+            self.assertNotIn("PP", fingerprint)
+
     def test_plaintext_provider_resolves_request_credential_without_persisting_secret(self):
         from weex_mcp.secret_provider import PlaintextSecretProvider
         from weex_mcp.tenant_context import TenantContext
@@ -127,6 +158,29 @@ class SecretProviderTests(unittest.TestCase):
         self.assertNotEqual(before.fingerprint, after.fingerprint)
         self.assertNotIn("AK_BEFORE", before.fingerprint)
         self.assertNotIn("AK_AFTER", after.fingerprint)
+
+    def test_static_mapping_fingerprint_changes_when_secret_or_passphrase_changes(self):
+        from weex_mcp.secret_provider import StaticMappingSecretProvider
+        from weex_mcp.tenant_context import TenantContext
+
+        record = {
+            "api_key": "AK",
+            "api_secret": "SK_BEFORE",
+            "api_passphrase": "PP_BEFORE",
+            "permissions": ["TRADE"],
+        }
+        provider = StaticMappingSecretProvider({"credref_a": record})
+        arguments = {"type": "credential_ref", "ref": "credref_a", "key_id": "key_a"}
+        context = TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a")
+
+        before = provider.resolve(credential_argument=arguments, context=context, required_permission="TRADE")
+        record["api_secret"] = "SK_AFTER"
+        changed_secret = provider.resolve(credential_argument=arguments, context=context, required_permission="TRADE")
+        record["api_passphrase"] = "PP_AFTER"
+        changed_passphrase = provider.resolve(credential_argument=arguments, context=context, required_permission="TRADE")
+
+        self.assertEqual(len({before.fingerprint, changed_secret.fingerprint, changed_passphrase.fingerprint}), 3)
+
 
 
 if __name__ == "__main__":

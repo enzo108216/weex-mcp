@@ -341,7 +341,7 @@ class OmittedTradeAdapterTests(unittest.TestCase):
         self.assertIn("orderId=1", write_calls[5]["url"])
 
     def test_batch_partial_result_is_explicit_but_malformed_or_empty_create_fails_closed(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         payloads = iter(
@@ -392,13 +392,15 @@ class OmittedTradeAdapterTests(unittest.TestCase):
         self.assertEqual(partial["items"][0]["client_order_id"], "a")
         self.assertEqual(partial["items"][1]["client_order_id"], "b")
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as empty:
             adapter.confirm_mutation(execution=execution(), **common)
-        with self.assertRaises(WeexRestBusinessError):
+        self.assertEqual(empty.exception.outcome_class, "unknown")
+        with self.assertRaises(TradeMutationError) as malformed:
             adapter.confirm_mutation(execution=execution(), **common)
+        self.assertEqual(malformed.exception.outcome_class, "unknown")
 
     def test_batch_results_reject_identifiers_unrelated_to_the_request(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         payloads = iter(
@@ -449,8 +451,9 @@ class OmittedTradeAdapterTests(unittest.TestCase):
 
         for execution in executions:
             with self.subTest(action=execution.action):
-                with self.assertRaises(WeexRestBusinessError):
+                with self.assertRaises(TradeMutationError) as raised:
                     adapter.confirm_mutation(execution=execution, **common)
+                self.assertEqual(raised.exception.outcome_class, "unknown")
 
     def test_batch_cancel_delete_serializes_the_bound_request_body(self):
         from weex_mcp.trade_execution import TradeExecution
@@ -490,6 +493,7 @@ class OmittedTradeAdapterTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[0]["data"]), {"orderIdList": ["1"]})
 
     def test_unknown_action_endpoint_and_demo_fail_before_write(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         calls = []
@@ -514,7 +518,7 @@ class OmittedTradeAdapterTests(unittest.TestCase):
                 arguments={"market": "futures", "trading_mode": "demo", "order_ids": ["1"]},
                 **common,
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=TradeExecution(
                     action="batch_cancel",
@@ -532,10 +536,12 @@ class OmittedTradeAdapterTests(unittest.TestCase):
                 ),
                 **common,
             )
+        self.assertEqual(raised.exception.outcome_class, "not_sent")
+        self.assertIs(raised.exception.write_attempted, False)
         self.assertEqual(calls, [])
 
     def test_conditional_cancel_rejects_a_mismatched_returned_order_id(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         adapter, provider = self._adapter(
@@ -556,16 +562,17 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=execution,
                 credential=self._resolved(provider, self._context()),
                 credential_argument=credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "unknown")
 
     def test_close_position_rejects_a_mismatched_returned_position_id(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         adapter, provider = self._adapter(
@@ -588,16 +595,17 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=execution,
                 credential=self._resolved(provider, self._context()),
                 credential_argument=credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "unknown")
 
     def test_position_margin_success_requires_position_readback(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         def transport(prepared, timeout):
@@ -629,16 +637,17 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=execution,
                 credential=self._resolved(provider, self._context()),
                 credential_argument=credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "unknown")
 
     def test_auto_append_margin_success_requires_configuration_readback(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         def transport(prepared, timeout):
@@ -670,13 +679,14 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=execution,
                 credential=self._resolved(provider, self._context()),
                 credential_argument=credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "unknown")
 
     def test_position_margin_accepts_staging_200_and_confirms_readback(self):
         from weex_mcp.trade_execution import TradeExecution
@@ -827,7 +837,7 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             )
 
     def test_tp_sl_place_requires_exactly_one_determinate_result(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         adapter, provider = self._adapter(
@@ -853,13 +863,14 @@ class OmittedTradeAdapterTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_mutation(
                 execution=execution,
                 credential=self._resolved(provider, self._context()),
                 credential_argument=credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "unknown")
 
 
 if __name__ == "__main__":

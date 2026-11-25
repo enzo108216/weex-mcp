@@ -383,7 +383,7 @@ class TradeRestCompleteTests(unittest.TestCase):
         self.assertEqual(captured["body"]["symbol"], "BTCUSDT")
 
     def test_futures_order_confirm_requires_explicit_success_true(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
 
         captured = {}
         adapter = self._adapter({"orderId": "2001", "clientOrderId": "mcp-client-id"}, captured)
@@ -395,13 +395,13 @@ class TradeRestCompleteTests(unittest.TestCase):
             credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
         )
 
-        with self.assertRaises(WeexRestBusinessError) as ctx:
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_order(
                 execution=self._preview_record(preview, market="futures", trading_mode="live"),
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
 
-        self.assertEqual(ctx.exception.code, "invalid_response")
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_futures_order_confirm_accepts_outer_success_with_nested_order(self):
         captured = {}
@@ -426,7 +426,7 @@ class TradeRestCompleteTests(unittest.TestCase):
         self.assertTrue(result["success"])
 
     def test_order_confirmation_rejects_a_mismatched_returned_client_id(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
 
         captured = {}
         adapter = self._adapter(
@@ -441,14 +441,15 @@ class TradeRestCompleteTests(unittest.TestCase):
             credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_order(
                 execution=self._preview_record(preview, market="futures", trading_mode="live"),
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_futures_cancel_confirmation_rejects_a_mismatched_returned_identifier(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution
 
         captured = {}
@@ -468,11 +469,12 @@ class TradeRestCompleteTests(unittest.TestCase):
             risk_signature="risk",
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_cancel_order(
                 execution=execution,
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_spot_preview_enforces_max_trade_amount_boundary(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
@@ -734,14 +736,14 @@ class TradeRestCompleteTests(unittest.TestCase):
             credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
         )
 
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
 
-        with self.assertRaises(WeexRestBusinessError) as ctx:
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_cancel_order(
                 execution=self._preview_record(preview, market="futures", trading_mode="live"),
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
-        self.assertEqual(ctx.exception.code, "invalid_response")
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_futures_cancel_by_client_id_accepts_staging_identity_only_response(self):
         captured = {}
@@ -788,14 +790,14 @@ class TradeRestCompleteTests(unittest.TestCase):
             credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
         )
 
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
 
-        with self.assertRaises(WeexRestBusinessError) as ctx:
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_leverage(
                 execution=self._preview_record(preview, market="futures", trading_mode="live"),
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
-        self.assertEqual(ctx.exception.code, "invalid_response")
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_futures_live_leverage_request(self):
         captured = {}
@@ -833,6 +835,171 @@ class TradeRestCompleteTests(unittest.TestCase):
             },
         )
         self.assertTrue(result["success"])
+
+    def test_explicit_atomic_leverage_preview_uses_exact_fields_without_symbol_config_read(self):
+        from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
+
+        private_calls = []
+        adapter = WeexTradeRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            market_adapter=FixedFuturesCatalogAdapter(),
+            transport=lambda prepared, timeout: private_calls.append(prepared) or b"{}",
+        )
+        preview = adapter.preview_leverage(
+            arguments={
+                "market": "futures",
+                "trading_mode": "live",
+                "symbol": "BTCUSDT",
+                "margin_mode": "cross",
+                "cross_leverage": "2",
+                "isolated_short_leverage": "4",
+            },
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertEqual(private_calls, [])
+        self.assertEqual(
+            preview["summary"]["request_body"],
+            {
+                "symbol": "BTCUSDT",
+                "marginType": "CROSSED",
+                "crossLeverage": "2",
+                "isolatedShortLeverage": "4",
+            },
+        )
+        self.assertEqual(preview["summary"]["leverage_mode"], "explicit_atomic")
+
+        for field in (
+            "cross_leverage",
+            "isolated_long_leverage",
+            "isolated_short_leverage",
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    adapter.preview_leverage(
+                        arguments={
+                            "market": "futures",
+                            "trading_mode": "live",
+                            "symbol": "BTCUSDT",
+                            field: "101",
+                        },
+                        credential=self._credential(),
+                        credential_argument=self._credential_argument(),
+                        context=self._context(),
+                    )
+        self.assertEqual(private_calls, [])
+
+    def test_explicit_atomic_leverage_confirm_requires_exact_requested_response_evidence(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
+        from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
+
+        arguments = {
+            "market": "futures",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "cross_leverage": "2",
+            "isolated_long_leverage": "3",
+        }
+        successful_calls = []
+        successful = WeexTradeRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            market_adapter=FixedFuturesCatalogAdapter(),
+            transport=lambda prepared, timeout: successful_calls.append(prepared)
+            or json.dumps(
+                {
+                    "symbol": "BTCUSDT",
+                    "marginType": "IGNORED_WHEN_NOT_REQUESTED",
+                    "crossLeverage": "2",
+                    "isolatedLongLeverage": "3",
+                }
+            ).encode(),
+        )
+        preview = successful.preview_leverage(
+            arguments=arguments,
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+        result = successful.confirm_leverage(
+            execution=self._preview_record(preview, market="futures", trading_mode="live"),
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(len(successful_calls), 1)
+        self.assertEqual(
+            successful_calls[0]["body"],
+            {"symbol": "BTCUSDT", "crossLeverage": "2", "isolatedLongLeverage": "3"},
+        )
+
+        failures = (
+            {"symbol": "ETHUSDT", "crossLeverage": "2", "isolatedLongLeverage": "3"},
+            {"symbol": "BTCUSDT", "crossLeverage": "2"},
+            {"symbol": "BTCUSDT", "crossLeverage": "9", "isolatedLongLeverage": "3"},
+        )
+        for response in failures:
+            with self.subTest(response=response):
+                calls = []
+                adapter = WeexTradeRestAdapter(
+                    secret_provider=FakeSecretProvider(),
+                    market_adapter=FixedFuturesCatalogAdapter(),
+                    transport=lambda prepared, timeout, response=response, calls=calls: calls.append(prepared)
+                    or json.dumps(response).encode(),
+                )
+                failed_preview = adapter.preview_leverage(
+                    arguments=arguments,
+                    credential=self._credential(),
+                    credential_argument=self._credential_argument(),
+                    context=self._context(),
+                )
+                with self.assertRaises(TradeMutationError) as ctx:
+                    adapter.confirm_leverage(
+                        execution=self._preview_record(
+                            failed_preview, market="futures", trading_mode="live"
+                        ),
+                        credential=self._credential(),
+                        credential_argument=self._credential_argument(),
+                        context=self._context(),
+                    )
+                self.assertEqual(ctx.exception.outcome_class, "unknown")
+                self.assertTrue(ctx.exception.write_attempted)
+                self.assertEqual(len(calls), 1)
+
+        margin_arguments = arguments | {"margin_mode": "isolated"}
+        margin_calls = []
+        margin_adapter = WeexTradeRestAdapter(
+            secret_provider=FakeSecretProvider(),
+            market_adapter=FixedFuturesCatalogAdapter(),
+            transport=lambda prepared, timeout: margin_calls.append(prepared)
+            or json.dumps(
+                {
+                    "symbol": "BTCUSDT",
+                    "marginType": "CROSSED",
+                    "crossLeverage": "2",
+                    "isolatedLongLeverage": "3",
+                }
+            ).encode(),
+        )
+        margin_preview = margin_adapter.preview_leverage(
+            arguments=margin_arguments,
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+        with self.assertRaises(TradeMutationError) as margin_ctx:
+            margin_adapter.confirm_leverage(
+                execution=self._preview_record(
+                    margin_preview, market="futures", trading_mode="live"
+                ),
+                credential=self._credential(),
+                credential_argument=self._credential_argument(),
+                context=self._context(),
+            )
+        self.assertEqual(margin_ctx.exception.outcome_class, "unknown")
+        self.assertEqual(len(margin_calls), 1)
 
     def test_leverage_preview_rejects_nested_symbol_config_failure_under_success_code(self):
         from weex_mcp.adapters.rest_errors import WeexRestBusinessError
@@ -1105,14 +1272,14 @@ class TradeRestCompleteTests(unittest.TestCase):
             credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
         )
 
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
 
-        with self.assertRaises(WeexRestBusinessError) as ctx:
+        with self.assertRaises(TradeMutationError) as ctx:
             adapter.confirm_margin_mode(
                 execution=self._preview_record(preview, market="futures", trading_mode="live"),
                 credential=self._credential(), credential_argument=self._credential_argument(), context=self._context(),
             )
-        self.assertEqual(ctx.exception.code, "invalid_response")
+        self.assertEqual(ctx.exception.outcome_class, "unknown")
 
     def test_spot_demo_and_demo_mutations_are_rejected(self):
         captured = {}

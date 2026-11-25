@@ -3,6 +3,41 @@ import unittest
 
 
 class McpServiceTests(unittest.TestCase):
+    def test_service_uses_injected_registry_for_listing_and_direct_tool_calls(self):
+        from weex_mcp.service import build_default_service
+        from weex_mcp.tool_registry import build_default_registry
+
+        registry = build_default_registry(
+            enabled_modules={"market", "account", "trade"},
+            credential_modes={"credential_ref"},
+        )
+        try:
+            service = build_default_service(trade_enabled=False, registry=registry)
+        except TypeError as exc:
+            self.fail(f"service registry injection is missing: {exc}")
+
+        listed = service.handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": "local-list", "method": "tools/list", "params": {}}
+        )
+        names = {tool["name"] for tool in listed["result"]["tools"]}
+        self.assertEqual(len(names), 24)
+        self.assertNotIn("broker_oauth_generate_authorization_url", names)
+        self.assertFalse(any(name.startswith("trade_") for name in names))
+
+        called = service.handle_jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": "local-direct-oauth",
+                "method": "tools/call",
+                "params": {
+                    "name": "broker_oauth_generate_authorization_url",
+                    "arguments": {"client_id": "client", "redirect_uri": "https://merchant.example/callback"},
+                },
+            }
+        )
+        self.assertNotIn("result", called)
+        self.assertEqual(called["error"]["code"], -32602)
+
     def test_trade_enabled_service_previews_with_plaintext_credential_without_user_context(self):
         from weex_mcp.adapters.trade_rest import WeexTradeRestAdapter
         from weex_mcp.secret_provider import RequestSecretProvider
@@ -128,7 +163,7 @@ class McpServiceTests(unittest.TestCase):
         )
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(names), 23)
+        self.assertEqual(len(names), 26)
         self.assertIn("broker_oauth_generate_authorization_url", names)
         self.assertIn("broker_oauth_exchange_code_for_api_key", names)
         self.assertIn("market_get_symbol_price", names)
@@ -143,7 +178,7 @@ class McpServiceTests(unittest.TestCase):
         )
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(names), 49)
+        self.assertEqual(len(names), 52)
         self.assertEqual(sum(name.startswith("trade_") for name in names), 26)
 
     def test_market_tool_can_run_without_credential(self):
@@ -178,6 +213,111 @@ class McpServiceTests(unittest.TestCase):
 
         self.assertTrue(response["result"]["ok"])
         self.assertEqual(response["result"]["data"]["symbol"], "BTCUSDT")
+
+    def test_t3_account_and_market_tools_dispatch_through_standard_envelopes(self):
+        from weex_mcp.service import build_default_service
+        from weex_mcp.tenant_context import TenantContext
+
+        class PublicMarketAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def get_server_time(self, *, market):
+                self.calls.append(("time", market))
+                return {"market": market, "server_time": 1, "raw": {"serverTime": 1}}
+
+            def ping(self, *, market):
+                self.calls.append(("ping", market))
+                return {"market": market, "reachable": True, "raw": {}}
+
+            def get_symbol_price(self, *, market, symbol=None, symbols=None, price_type=None):
+                self.calls.append(("price", market, symbol, symbols, price_type))
+                prices = (
+                    [{"symbol": item, "price": "1"} for item in symbols]
+                    if symbols is not None
+                    else [{"symbol": "BTCUSDT", "price": "1"}]
+                )
+                return {
+                    "market": market,
+                    "prices": prices,
+                    "raw": [],
+                }
+
+            def get_exchange_info(self, *, market, symbol=None, symbols=None, symbol_status=None):
+                self.calls.append(("exchange", market, symbol, symbols, symbol_status))
+                return {
+                    "market": market,
+                    "symbols": [{"symbol": item, "status": symbol_status} for item in symbols],
+                    "raw": {},
+                }
+
+        class AccountAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def get_position(self, **kwargs):
+                self.calls.append(kwargs)
+                return {
+                    "market": kwargs["market"],
+                    "trading_mode": kwargs["trading_mode"],
+                    "symbol": kwargs["symbol"],
+                    "positions": [],
+                    "raw": [],
+                }
+
+        market_adapter = PublicMarketAdapter()
+        account_adapter = AccountAdapter()
+        service = build_default_service(
+            trade_enabled=False,
+            market_adapter=market_adapter,
+            account_adapter=account_adapter,
+        )
+        context = TenantContext(tenant_id="tenant_a", user_id="user_a", session_id="session_a")
+        calls = (
+            ("market_get_server_time", {"market": "futures"}),
+            ("market_ping", {"market": "spot"}),
+            ("market_get_symbol_price", {"market": "spot"}),
+            ("market_get_symbol_price", {"market": "spot", "symbols": ["btc/usdt", "ETHUSDT"]}),
+            (
+                "market_get_exchange_info",
+                {"market": "spot", "symbols": ["btc/usdt", "ETHUSDT"], "symbol_status": "TRADING"},
+            ),
+            (
+                "account_get_position",
+                {
+                    "market": "futures",
+                    "trading_mode": "live",
+                    "symbol": "BTCUSDT",
+                    "credential": {"type": "credential_ref", "key_id": "key", "ref": "ref"},
+                },
+            ),
+        )
+        for index, (name, arguments) in enumerate(calls):
+            with self.subTest(name=name):
+                response = service.handle_jsonrpc(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": f"t3-{index}",
+                        "method": "tools/call",
+                        "params": {"name": name, "arguments": arguments},
+                    },
+                    context=context,
+                )
+                self.assertTrue(response["result"]["structuredContent"]["ok"])
+                self.assertFalse(response["result"]["isError"])
+
+        self.assertEqual(
+            market_adapter.calls,
+            [
+                ("time", "futures"),
+                ("ping", "spot"),
+                ("price", "spot", None, None, None),
+                ("price", "spot", None, ["BTCUSDT", "ETHUSDT"], None),
+                ("exchange", "spot", None, ["BTCUSDT", "ETHUSDT"], "TRADING"),
+            ],
+        )
+        self.assertEqual(account_adapter.calls[0]["symbol"], "BTCUSDT")
+        self.assertEqual(account_adapter.calls[0]["credential_argument"]["ref"], "ref")
 
     def test_account_tool_fails_closed_without_credential(self):
         from weex_mcp.service import build_default_service

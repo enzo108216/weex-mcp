@@ -19,6 +19,7 @@ from ..tenant_context import TenantContext
 from ..trade_execution import TradeExecution, canonical_payload_hash
 from .market import MarketPriceAdapter, WeexMarketRestAdapter
 from .rest_errors import SUCCESS_CODES, WeexRestBusinessError, raise_for_weex_business_error
+from .trade_guard import TradeMutationError, mutation_outcome
 
 SPOT_BASE_URL = "https://api-spot.weex.com"
 FUTURES_BASE_URL = "https://api-contract.weex.com"
@@ -41,6 +42,12 @@ FUTURES_MODIFY_TP_SL_PATH = "/capi/v3/modifyTpSlOrder"
 FUTURES_CLOSE_POSITIONS_PATH = "/capi/v3/closePositions"
 FUTURES_POSITION_MARGIN_PATH = "/capi/v3/account/positionMargin"
 FUTURES_AUTO_APPEND_MARGIN_PATH = "/capi/v3/account/modifyAutoAppendMargin"
+
+_EXPLICIT_LEVERAGE_FIELD_MAP = (
+    ("cross_leverage", "crossLeverage"),
+    ("isolated_long_leverage", "isolatedLongLeverage"),
+    ("isolated_short_leverage", "isolatedShortLeverage"),
+)
 FUTURES_POSITIONS_PATH = "/capi/v3/account/position/allPosition"
 SPOT_USDT_MIN_ORDER_VALUE = Decimal("5")
 FUTURES_HTTP_200_SUCCESS_PATHS = {
@@ -127,12 +134,16 @@ class WeexTradeRestAdapter:
         credential_argument: dict[str, Any],
         context: TenantContext,
     ) -> dict[str, Any]:
-        if execution.summary.get("action") not in (None, "order"):
-            raise ValueError("Execution action is not an order.")
         body = dict(execution.summary.get("request_body") or {})
         endpoint = str(execution.summary.get("endpoint") or "")
-        _validate_execution_order(execution.market, execution.trading_mode, endpoint, body)
-        credential = self._credential_for_request(credential, credential_argument, context)
+        mutation_details = _mutation_identity_details(action="order", request_binding=body)
+        try:
+            if execution.summary.get("action") not in (None, "order"):
+                raise ValueError("Execution action is not an order.")
+            _validate_execution_order(execution.market, execution.trading_mode, endpoint, body)
+            credential = self._credential_for_request(credential, credential_argument, context)
+        except Exception as exc:
+            raise _pre_mutation_error(exc, details=mutation_details) from exc
         payload = self._request(
             market=execution.market,
             method="POST",
@@ -140,36 +151,27 @@ class WeexTradeRestAdapter:
             query={},
             body=body,
             credential=credential,
+            mutation_action="order",
+            mutation_details=mutation_details,
         )
-        result_payload = _extract_mapping_payload(payload)
-        _raise_if_trade_rejected(payload, result_payload)
-        if execution.market == "futures" and not (
-            (isinstance(payload, dict) and payload.get("success") is True)
-            or result_payload.get("success") is True
-        ):
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX futures order response did not explicitly confirm success.",
+        try:
+            result = _normalize_order_confirm_result(
+                market=execution.market,
+                request_body=body,
                 payload=payload,
             )
-        order_id = _optional_str(result_payload.get("orderId"))
-        if not order_id:
-            raise WeexRestBusinessError(code="invalid_response", message="WEEX order response did not contain orderId.", payload=payload)
-        returned_client_order_id = _optional_str(result_payload.get("clientOrderId"))
-        requested_client_order_id = _optional_str(body.get("newClientOrderId"))
-        if returned_client_order_id and returned_client_order_id != requested_client_order_id:
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX order response did not match the requested client order ID.",
-                payload=payload,
-            )
-        return {
-            "exchange_order_id": order_id,
-            "client_order_id": returned_client_order_id or requested_client_order_id,
-            "status": "accepted",
-            "success": True,
-            "raw": payload,
-        }
+        except WeexRestBusinessError as exc:
+            raise _post_mutation_error(
+                exc,
+                unknown_message="WEEX order result is unknown.",
+                details=mutation_details,
+            ) from exc
+        result["_outcome"] = _accepted_mutation_outcome(
+            action="order",
+            result=result,
+            request_binding=body,
+        )
+        return result
 
     def preview_cancel_order(
         self,
@@ -207,60 +209,45 @@ class WeexTradeRestAdapter:
         credential_argument: dict[str, Any],
         context: TenantContext,
     ) -> dict[str, Any]:
-        if execution.summary.get("action") != "cancel_order":
-            raise ValueError("Execution action is not a cancel_order.")
         path = str(execution.summary.get("endpoint") or "")
         query = {str(k): str(v) for k, v in dict(execution.summary.get("request_query") or {}).items()}
-        if path not in {SPOT_ORDER_PATH, FUTURES_ORDER_PATH} or execution.trading_mode != "live":
-            raise ValueError("Execution endpoint is not a supported live cancel endpoint.")
-        credential = self._credential_for_request(credential, credential_argument, context)
-        payload = self._request(market=execution.market, method="DELETE", path=path, query=query, body={}, credential=credential)
-        result_payload = _extract_mapping_payload(payload)
-        _raise_if_trade_rejected(payload, result_payload)
-        status = str(result_payload.get("status") or "").upper()
-        if execution.market == "futures":
-            success = result_payload.get("success") is True
-        else:
-            success = status in {"CANCELED", "CANCELLED"} and result_payload.get("orderId") not in (None, "")
-        if not success:
-            raise WeexRestBusinessError(code="invalid_response", message="WEEX cancel response did not confirm cancellation.", payload=payload)
-        returned_order_id = _optional_str(result_payload.get("orderId"))
-        returned_client_order_id = _optional_str(
-            result_payload.get("origClientOrderId") or result_payload.get("clientOrderId")
+        mutation_details = _mutation_identity_details(action="cancel_order", request_binding=query)
+        try:
+            if execution.summary.get("action") != "cancel_order":
+                raise ValueError("Execution action is not a cancel_order.")
+            if path not in {SPOT_ORDER_PATH, FUTURES_ORDER_PATH} or execution.trading_mode != "live":
+                raise ValueError("Execution endpoint is not a supported live cancel endpoint.")
+            credential = self._credential_for_request(credential, credential_argument, context)
+        except Exception as exc:
+            raise _pre_mutation_error(exc, details=mutation_details) from exc
+        payload = self._request(
+            market=execution.market,
+            method="DELETE",
+            path=path,
+            query=query,
+            body={},
+            credential=credential,
+            mutation_action="cancel_order",
+            mutation_details=mutation_details,
         )
-        requested_order_id = _optional_str(query.get("orderId"))
-        requested_client_order_id = _optional_str(query.get("origClientOrderId"))
-        if requested_order_id and returned_order_id != requested_order_id:
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX cancel response did not match the requested order ID.",
+        try:
+            result = _normalize_cancel_confirm_result(
+                market=execution.market,
+                request_query=query,
                 payload=payload,
             )
-        if not requested_order_id and not returned_order_id and not returned_client_order_id:
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX cancel response did not contain a requested order identity.",
-                payload=payload,
-            )
-        if returned_client_order_id and returned_client_order_id != requested_client_order_id:
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX cancel response did not match the requested client order ID.",
-                payload=payload,
-            )
-        if execution.market == "futures" and requested_client_order_id and not returned_client_order_id:
-            raise WeexRestBusinessError(
-                code="invalid_response",
-                message="WEEX futures cancel response lacked the requested client order ID.",
-                payload=payload,
-            )
-        return {
-            "exchange_order_id": returned_order_id,
-            "client_order_id": returned_client_order_id or requested_client_order_id,
-            "status": "canceled",
-            "success": True,
-            "raw": payload,
-        }
+        except WeexRestBusinessError as exc:
+            raise _post_mutation_error(
+                exc,
+                unknown_message="WEEX cancellation result is unknown.",
+                details=mutation_details,
+            ) from exc
+        result["_outcome"] = _accepted_mutation_outcome(
+            action="cancel_order",
+            result=result,
+            request_binding=query,
+        )
+        return result
 
     def preview_leverage(
         self,
@@ -275,6 +262,40 @@ class WeexTradeRestAdapter:
         if market != "futures" or trading_mode != "live":
             raise ValueError("Leverage endpoint only supports live futures.")
         symbol = _normalize_symbol(arguments.get("symbol"))
+        explicit_fields = [
+            (source, target)
+            for source, target in _EXPLICIT_LEVERAGE_FIELD_MAP
+            if source in arguments
+        ]
+        if explicit_fields:
+            if "leverage" in arguments or "position_side" in arguments:
+                raise ValueError("Explicit leverage fields cannot be combined with leverage or position_side.")
+            explicit_body: dict[str, str] = {"symbol": symbol}
+            if "margin_mode" in arguments:
+                explicit_body["marginType"] = _normalize_margin_mode(arguments.get("margin_mode"))
+            requested_values: list[tuple[str, str]] = []
+            for source, target in explicit_fields:
+                value = _positive_decimal(arguments.get(source), source)
+                requested_values.append((target, value))
+            symbol_rule = _find_symbol_rule(
+                self.market_adapter.get_exchange_info(market="futures", symbol=symbol),
+                symbol=symbol,
+                market="futures",
+            )
+            for target, value in requested_values:
+                _validate_leverage_rule(value, symbol_rule)
+                explicit_body[target] = value
+            preview = _preview(
+                action="update_leverage",
+                market=market,
+                trading_mode=trading_mode,
+                endpoint=FUTURES_LEVERAGE_PATH,
+                body=explicit_body,
+                risk_alerts=["leverage_change_requires_confirmation"],
+            )
+            preview["summary"]["leverage_mode"] = "explicit_atomic"
+            return preview
+
         leverage = _positive_decimal(arguments.get("leverage"), "leverage")
         symbol_rule = _find_symbol_rule(
             self.market_adapter.get_exchange_info(market="futures", symbol=symbol),
@@ -384,30 +405,47 @@ class WeexTradeRestAdapter:
         credential_argument: dict[str, Any],
         context: TenantContext,
     ) -> dict[str, Any]:
-        if execution.trading_mode != "live":
-            raise ValueError("Extended trade mutations only support live trading_mode.")
         action = execution.action
         endpoint = str(execution.summary.get("endpoint") or "")
-        expected = _mutation_transport(action=action, market=execution.market, endpoint=endpoint)
-        if execution.summary.get("action") != action:
-            raise ValueError("Execution action binding is invalid.")
-        method, binding_field = expected
-        binding = execution.summary.get(binding_field)
+        binding = execution.summary.get("request_body")
         if not isinstance(binding, dict):
-            raise ValueError("Execution request binding is invalid.")
-        credential = self._credential_for_request(credential, credential_argument, context)
+            binding = execution.summary.get("request_query")
+        if not isinstance(binding, dict):
+            binding = {}
+        mutation_details = _mutation_identity_details(action=action, request_binding=binding)
+        try:
+            if execution.trading_mode != "live":
+                raise ValueError("Extended trade mutations only support live trading_mode.")
+            method, binding_field = _mutation_transport(
+                action=action,
+                market=execution.market,
+                endpoint=endpoint,
+            )
+            if execution.summary.get("action") != action:
+                raise ValueError("Execution action binding is invalid.")
+            raw_binding = execution.summary.get(binding_field)
+            if not isinstance(raw_binding, dict):
+                raise ValueError("Execution request binding is invalid.")
+            binding = raw_binding
+            mutation_details = _mutation_identity_details(action=action, request_binding=binding)
+            credential = self._credential_for_request(credential, credential_argument, context)
+        except Exception as exc:
+            raise _pre_mutation_error(exc, details=mutation_details) from exc
         position_before: dict[str, Any] | None = None
         margin_before: Decimal | None = None
-        if action == "position_margin":
-            position_id = _normalize_order_id(binding.get("isolatedPositionId"))
-            position_before = _require_isolated_position(self._load_positions(credential), position_id)
-            margin_before = _required_position_decimal(position_before, "isolatedMargin")
-            _position_margin_target(binding=binding, margin_before=margin_before)
-        elif action == "auto_append_margin":
-            position_id = _normalize_order_id(binding.get("positionId"))
-            position_before = _require_isolated_position(self._load_positions(credential), position_id)
-            if not isinstance(binding.get("autoAppendMargin"), bool):
-                raise ValueError("Execution auto-append-margin binding is invalid.")
+        try:
+            if action == "position_margin":
+                position_id = _normalize_order_id(binding.get("isolatedPositionId"))
+                position_before = _require_isolated_position(self._load_positions(credential), position_id)
+                margin_before = _required_position_decimal(position_before, "isolatedMargin")
+                _position_margin_target(binding=binding, margin_before=margin_before)
+            elif action == "auto_append_margin":
+                position_id = _normalize_order_id(binding.get("positionId"))
+                position_before = _require_isolated_position(self._load_positions(credential), position_id)
+                if not isinstance(binding.get("autoAppendMargin"), bool):
+                    raise ValueError("Execution auto-append-margin binding is invalid.")
+        except Exception as exc:
+            raise _pre_mutation_error(exc, details=mutation_details) from exc
         payload = self._request(
             market=execution.market,
             method=method,
@@ -415,46 +453,62 @@ class WeexTradeRestAdapter:
             query={str(key): str(value) for key, value in binding.items()} if binding_field == "request_query" else {},
             body=dict(binding) if binding_field == "request_body" else {},
             credential=credential,
+            mutation_action=action,
+            mutation_details=mutation_details,
         )
-        result = _normalize_mutation_result(
+        try:
+            result = _normalize_mutation_result(
+                action=action,
+                market=execution.market,
+                endpoint=endpoint,
+                request_binding=binding,
+                payload=payload,
+            )
+            if action == "position_margin":
+                assert margin_before is not None
+                position_id = str(binding["isolatedPositionId"])
+                position_after = _require_isolated_position(self._load_positions(credential), position_id)
+                margin_after = _required_position_decimal(position_after, "isolatedMargin")
+                target_margin = _position_margin_target(binding=binding, margin_before=margin_before)
+                if margin_after != target_margin:
+                    raise WeexRestBusinessError(
+                        code="invalid_response",
+                        message="WEEX position-margin response was not confirmed by position read-back.",
+                        payload={"positionId": position_id},
+                    )
+                result["verification"] = {
+                    "position_id": position_id,
+                    "isolated_margin_before": str(margin_before),
+                    "isolated_margin_after": str(margin_after),
+                }
+            elif action == "auto_append_margin":
+                position_id = str(binding["positionId"])
+                position_after = _require_isolated_position(self._load_positions(credential), position_id)
+                enabled_after = position_after.get("isAutoAppendIsolatedMargin")
+                if not isinstance(enabled_after, bool) or enabled_after is not binding["autoAppendMargin"]:
+                    raise WeexRestBusinessError(
+                        code="invalid_response",
+                        message="WEEX auto-append-margin response was not confirmed by position read-back.",
+                        payload={"positionId": position_id},
+                    )
+                result["verification"] = {
+                    "position_id": position_id,
+                    "auto_append_margin_before": position_before.get("isAutoAppendIsolatedMargin") if position_before else None,
+                    "auto_append_margin_after": enabled_after,
+                }
+        except TradeMutationError:
+            raise
+        except Exception as exc:
+            safe_details = exc.safe_details() if isinstance(exc, WeexRestBusinessError) else {}
+            raise _mutation_unknown_error(
+                message="WEEX mutation result is unknown after submission.",
+                details=_merge_safe_details(mutation_details, **safe_details),
+            ) from exc
+        result["_outcome"] = _accepted_mutation_outcome(
             action=action,
-            market=execution.market,
-            endpoint=endpoint,
+            result=result,
             request_binding=binding,
-            payload=payload,
         )
-        if action == "position_margin":
-            assert margin_before is not None
-            position_id = str(binding["isolatedPositionId"])
-            position_after = _require_isolated_position(self._load_positions(credential), position_id)
-            margin_after = _required_position_decimal(position_after, "isolatedMargin")
-            target_margin = _position_margin_target(binding=binding, margin_before=margin_before)
-            if margin_after != target_margin:
-                raise WeexRestBusinessError(
-                    code="invalid_response",
-                    message="WEEX position-margin response was not confirmed by position read-back.",
-                    payload={"positionId": position_id},
-                )
-            result["verification"] = {
-                "position_id": position_id,
-                "isolated_margin_before": str(margin_before),
-                "isolated_margin_after": str(margin_after),
-            }
-        elif action == "auto_append_margin":
-            position_id = str(binding["positionId"])
-            position_after = _require_isolated_position(self._load_positions(credential), position_id)
-            enabled_after = position_after.get("isAutoAppendIsolatedMargin")
-            if not isinstance(enabled_after, bool) or enabled_after is not binding["autoAppendMargin"]:
-                raise WeexRestBusinessError(
-                    code="invalid_response",
-                    message="WEEX auto-append-margin response was not confirmed by position read-back.",
-                    payload={"positionId": position_id},
-                )
-            result["verification"] = {
-                "position_id": position_id,
-                "auto_append_margin_before": position_before.get("isAutoAppendIsolatedMargin") if position_before else None,
-                "auto_append_margin_after": enabled_after,
-            }
         return result
 
     def _preview_batch_order(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
@@ -713,22 +767,50 @@ class WeexTradeRestAdapter:
         return data
 
     def _confirm_mutation(self, *, execution: TradeExecution, expected_action: str, endpoint: str, credential: Any, credential_argument: dict[str, Any], context: TenantContext) -> dict[str, Any]:
-        if execution.summary.get("action") != expected_action or execution.summary.get("endpoint") != endpoint or execution.market != "futures" or execution.trading_mode != "live":
-            raise ValueError("Execution does not match the requested trade mutation.")
-        credential = self._credential_for_request(credential, credential_argument, context)
-        payload = self._request(market="futures", method="POST", path=endpoint, query={}, body=dict(execution.summary.get("request_body") or {}), credential=credential)
-        result_payload = _extract_mapping_payload(payload)
-        _raise_if_trade_rejected(payload, result_payload)
-        if endpoint == FUTURES_LEVERAGE_PATH:
-            evidence = _leverage_response_matches_request(
-                request_body=dict(execution.summary.get("request_body") or {}),
-                response_payload=result_payload,
-            )
-        else:
-            evidence = _has_success_code(payload, endpoint=endpoint) or result_payload.get("success") is True
-        if not evidence:
-            raise WeexRestBusinessError(code="invalid_response", message="WEEX trade mutation response was malformed.", payload=payload)
-        return {"status": "accepted", "success": True, "raw": payload}
+        request_body = dict(execution.summary.get("request_body") or {})
+        mutation_details = _mutation_identity_details(action=expected_action, request_binding=request_body)
+        try:
+            if execution.summary.get("action") != expected_action or execution.summary.get("endpoint") != endpoint or execution.market != "futures" or execution.trading_mode != "live":
+                raise ValueError("Execution does not match the requested trade mutation.")
+            credential = self._credential_for_request(credential, credential_argument, context)
+        except Exception as exc:
+            raise _pre_mutation_error(exc, details=mutation_details) from exc
+        payload = self._request(
+            market="futures",
+            method="POST",
+            path=endpoint,
+            query={},
+            body=request_body,
+            credential=credential,
+            mutation_action=expected_action,
+            mutation_details=mutation_details,
+        )
+        try:
+            result_payload = _extract_mapping_payload(payload)
+            _raise_if_trade_rejected(payload, result_payload)
+            if endpoint == FUTURES_LEVERAGE_PATH:
+                evidence = _leverage_response_matches_request(
+                    request_body=request_body,
+                    response_payload=result_payload,
+                    explicit_atomic=execution.summary.get("leverage_mode") == "explicit_atomic",
+                )
+            else:
+                evidence = _has_success_code(payload, endpoint=endpoint) or result_payload.get("success") is True
+            if not evidence:
+                raise WeexRestBusinessError(code="invalid_response", message="WEEX trade mutation response was malformed.", payload=payload)
+        except WeexRestBusinessError as exc:
+            raise _post_mutation_error(
+                exc,
+                unknown_message="WEEX account mutation result is unknown.",
+                details=mutation_details,
+            ) from exc
+        result = {"status": "accepted", "success": True, "raw": payload}
+        result["_outcome"] = _accepted_mutation_outcome(
+            action=expected_action,
+            result=result,
+            request_binding=request_body,
+        )
+        return result
 
     def _resolve_trade_credential(self, credential_argument: dict[str, Any], context: TenantContext) -> Any:
         return self.secret_provider.resolve(credential_argument=credential_argument, context=context, required_permission="TRADE")
@@ -775,7 +857,18 @@ class WeexTradeRestAdapter:
             return credential
         return self._resolve_trade_credential(credential_argument, context)
 
-    def _request(self, *, market: str, method: str, path: str, query: dict[str, str], body: dict[str, Any], credential: Any) -> Any:
+    def _request(
+        self,
+        *,
+        market: str,
+        method: str,
+        path: str,
+        query: dict[str, str],
+        body: dict[str, Any],
+        credential: Any,
+        mutation_action: str | None = None,
+        mutation_details: dict[str, Any] | None = None,
+    ) -> Any:
         prepared = _prepare_signed_request(
             base_url=self.spot_base_url if market == "spot" else self.futures_base_url,
             method=method,
@@ -787,10 +880,31 @@ class WeexTradeRestAdapter:
             api_passphrase=credential.api_passphrase,
             timestamp_ms=str(int(self.time_func() * 1000)),
         )
-        raw_bytes = self.transport(prepared, self.timeout_seconds)
+        if mutation_action is not None:
+            prepared["_mutation_action"] = mutation_action
+        try:
+            raw_bytes = self.transport(prepared, self.timeout_seconds)
+        except HTTPError as exc:
+            if mutation_action is None:
+                raise
+            raise _mutation_http_error(exc, details=mutation_details) from exc
+        except TradeMutationError:
+            raise
+        except Exception as exc:
+            if mutation_action is None:
+                raise
+            raise _mutation_unknown_error(
+                message="WEEX mutation transport result is unknown.",
+                details=_merge_safe_details(mutation_details, reason=exc.__class__.__name__),
+            ) from exc
         try:
             payload = json.loads(raw_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if mutation_action is not None:
+                raise _mutation_unknown_error(
+                    message="WEEX mutation response was malformed.",
+                    details=mutation_details,
+                ) from exc
             raise WeexRestBusinessError(code="invalid_response", message="WEEX returned malformed JSON.") from exc
         validation_payload = payload
         if (
@@ -803,7 +917,18 @@ class WeexTradeRestAdapter:
             # ``success=false`` or error codes are still scanned fail-closed.
             validation_payload = dict(payload)
             validation_payload["code"] = "0"
-        raise_for_weex_business_error(validation_payload)
+        try:
+            raise_for_weex_business_error(validation_payload)
+        except WeexRestBusinessError as exc:
+            if mutation_action is None:
+                raise
+            raise TradeMutationError(
+                code="upstream_error",
+                message="WEEX explicitly rejected the mutation.",
+                outcome_class="definitive_rejection",
+                write_attempted=True,
+                details=_merge_safe_details(mutation_details, **exc.safe_details()),
+            ) from exc
         return payload
 
 
@@ -1402,6 +1527,249 @@ def _payload_data(payload: Any) -> Any:
     return payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
 
 
+def _normalize_order_confirm_result(
+    *,
+    market: str,
+    request_body: dict[str, Any],
+    payload: Any,
+) -> dict[str, Any]:
+    result_payload = _extract_mapping_payload(payload)
+    _raise_if_trade_rejected(payload, result_payload)
+    if market == "futures" and not (
+        (isinstance(payload, dict) and payload.get("success") is True)
+        or result_payload.get("success") is True
+    ):
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX futures order response did not explicitly confirm success.",
+            payload=payload,
+        )
+    order_id = _optional_str(result_payload.get("orderId"))
+    if not order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX order response did not contain orderId.",
+            payload=payload,
+        )
+    returned_client_order_id = _optional_str(result_payload.get("clientOrderId"))
+    requested_client_order_id = _optional_str(request_body.get("newClientOrderId"))
+    if returned_client_order_id and returned_client_order_id != requested_client_order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX order response did not match the requested client order ID.",
+            payload=payload,
+        )
+    return {
+        "exchange_order_id": order_id,
+        "client_order_id": returned_client_order_id or requested_client_order_id,
+        "status": "accepted",
+        "success": True,
+        "raw": payload,
+    }
+
+
+def _normalize_cancel_confirm_result(
+    *,
+    market: str,
+    request_query: dict[str, str],
+    payload: Any,
+) -> dict[str, Any]:
+    result_payload = _extract_mapping_payload(payload)
+    _raise_if_trade_rejected(payload, result_payload)
+    status = str(result_payload.get("status") or "").upper()
+    if market == "futures":
+        success = result_payload.get("success") is True
+    else:
+        success = status in {"CANCELED", "CANCELLED"} and result_payload.get("orderId") not in (None, "")
+    if not success:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX cancel response did not confirm cancellation.",
+            payload=payload,
+        )
+    returned_order_id = _optional_str(result_payload.get("orderId"))
+    returned_client_order_id = _optional_str(
+        result_payload.get("origClientOrderId") or result_payload.get("clientOrderId")
+    )
+    requested_order_id = _optional_str(request_query.get("orderId"))
+    requested_client_order_id = _optional_str(request_query.get("origClientOrderId"))
+    if requested_order_id and returned_order_id != requested_order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX cancel response did not match the requested order ID.",
+            payload=payload,
+        )
+    if not requested_order_id and not returned_order_id and not returned_client_order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX cancel response did not contain a requested order identity.",
+            payload=payload,
+        )
+    if returned_client_order_id and returned_client_order_id != requested_client_order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX cancel response did not match the requested client order ID.",
+            payload=payload,
+        )
+    if market == "futures" and requested_client_order_id and not returned_client_order_id:
+        raise WeexRestBusinessError(
+            code="invalid_response",
+            message="WEEX futures cancel response lacked the requested client order ID.",
+            payload=payload,
+        )
+    return {
+        "exchange_order_id": returned_order_id,
+        "client_order_id": returned_client_order_id or requested_client_order_id,
+        "status": "canceled",
+        "success": True,
+        "raw": payload,
+    }
+
+
+def _mutation_identity_details(*, action: str, request_binding: dict[str, Any]) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    client_order_id = _optional_str(
+        request_binding.get("newClientOrderId")
+        or request_binding.get("origClientOrderId")
+        or request_binding.get("clientAlgoId")
+    )
+    operation_reference = _optional_str(
+        request_binding.get("orderId")
+        or request_binding.get("positionId")
+        or request_binding.get("isolatedPositionId")
+    )
+    if client_order_id:
+        details["client_order_id"] = client_order_id
+    if operation_reference:
+        details["operation_reference"] = operation_reference
+        details["reconcile_identity"] = operation_reference
+    return details
+
+
+def _accepted_mutation_outcome(
+    *,
+    action: str,
+    result: dict[str, Any],
+    request_binding: dict[str, Any],
+) -> dict[str, Any]:
+    items = result.get("items")
+    if isinstance(items, list):
+        item_outcomes = _mutation_item_outcomes(action=action, items=items)
+        if item_outcomes is None:
+            return mutation_outcome(outcome_class="unknown", write_attempted=True, action=action)
+        classes = {item["class"] for item in item_outcomes}
+        if classes == {"accepted"}:
+            outcome_class = "accepted"
+        elif classes == {"definitive_rejection"}:
+            outcome_class = "definitive_rejection"
+        elif classes <= {"accepted", "definitive_rejection"}:
+            outcome_class = "partial"
+        else:
+            outcome_class = "unknown"
+        return mutation_outcome(
+            outcome_class=outcome_class,
+            write_attempted=True,
+            action=action,
+            items=item_outcomes,
+        )
+    identity = _mutation_identity_details(action=action, request_binding=request_binding)
+    client_order_id = _optional_str(result.get("client_order_id")) or identity.get("client_order_id")
+    operation_reference = _optional_str(
+        result.get("exchange_order_id")
+        or result.get("order_id")
+        or result.get("position_id")
+    ) or identity.get("operation_reference")
+    reconcile_identity = _optional_str(result.get("reconcile_identity")) or identity.get("reconcile_identity")
+    return mutation_outcome(
+        outcome_class="accepted",
+        write_attempted=True,
+        action=action,
+        client_order_id=client_order_id,
+        operation_reference=operation_reference,
+        reconcile_identity=reconcile_identity,
+    )
+
+
+def _mutation_item_outcomes(*, action: str, items: list[Any]) -> list[dict[str, Any]] | None:
+    if not items:
+        return None
+    outcomes: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        client_order_id = _optional_str(item.get("client_order_id"))
+        operation_reference = _optional_str(
+            item.get("order_id")
+            or item.get("position_id")
+            or item.get("requested_order_id")
+        )
+        if not client_order_id and not operation_reference:
+            return None
+        if item.get("ok") is True:
+            item_outcome = mutation_outcome(
+                outcome_class="accepted",
+                write_attempted=True,
+                action=action,
+                client_order_id=client_order_id,
+                operation_reference=operation_reference,
+            )
+        elif item.get("ok") is False and isinstance(item.get("error"), dict):
+            error_code = _optional_str(item["error"].get("code"))
+            if not error_code:
+                return None
+            item_outcome = mutation_outcome(
+                outcome_class="definitive_rejection",
+                write_attempted=True,
+                action=action,
+                client_order_id=client_order_id,
+                operation_reference=operation_reference,
+            )
+            item_outcome["error_code"] = error_code
+        else:
+            return None
+        outcomes.append(item_outcome)
+    return outcomes
+
+
+def _pre_mutation_error(exc: Exception, *, details: dict[str, Any]) -> TradeMutationError:
+    if isinstance(exc, TradeMutationError):
+        return exc
+    if isinstance(exc, WeexRestBusinessError):
+        code = "upstream_error"
+        message = "WEEX pre-mutation read failed."
+        safe_details = _merge_safe_details(details, **exc.safe_details())
+    elif isinstance(exc, ValueError):
+        code = "invalid_arguments"
+        message = str(exc)
+        safe_details = dict(details)
+    else:
+        code = "upstream_error"
+        message = "WEEX pre-mutation read failed."
+        safe_details = _merge_safe_details(details, reason=exc.__class__.__name__)
+    return TradeMutationError(
+        code=code,
+        message=message,
+        outcome_class="not_sent",
+        write_attempted=False,
+        details=safe_details,
+    )
+
+
+def _post_mutation_error(
+    exc: Exception,
+    *,
+    unknown_message: str,
+    details: dict[str, Any],
+) -> TradeMutationError:
+    if isinstance(exc, TradeMutationError):
+        return exc
+    if isinstance(exc, WeexRestBusinessError):
+        safe_details = _merge_safe_details(details, **exc.safe_details())
+    else:
+        safe_details = _merge_safe_details(details, reason=exc.__class__.__name__)
+    return _mutation_unknown_error(message=unknown_message, details=safe_details)
+
+
 def _extract_result_items(payload: Any, *, container: str | None = None) -> list[dict[str, Any]]:
     data = _payload_data(payload)
     if container is not None and isinstance(data, dict):
@@ -1434,13 +1802,23 @@ def _normalized_item_result(
     error_message = _optional_str(item.get("errorMessage") or item.get("errorMsg") or item.get("msg"))
     if not error_code and not error_message:
         raise WeexRestBusinessError(code="invalid_response", message="WEEX mutation failure item lacked error evidence.", payload=item)
-    return {
+    result = {
         "ok": False,
         "error": {
             "code": error_code or "upstream_rejected",
             "message": error_message or "WEEX rejected the mutation item.",
         },
     }
+    client_id = _optional_str(item.get(client_id_field) or item.get("origClientOrderId"))
+    if client_id:
+        result["client_order_id"] = client_id
+    order_id = _optional_str(item.get(order_id_field))
+    if order_id:
+        result["order_id"] = order_id
+    position_id = _optional_str(item.get("positionId"))
+    if position_id:
+        result["position_id"] = position_id
+    return result
 
 
 def _aggregate_items(*, action: str, endpoint: str, items: list[dict[str, Any]], raw: Any) -> dict[str, Any]:
@@ -1475,10 +1853,36 @@ def _normalize_mutation_result(
             market=market,
             request_binding=request_binding,
         )
-        if len(raw_items) != len(requested_identifiers) or not raw_items:
+        if (
+            len(raw_items) != len(requested_identifiers)
+            or not raw_items
+            or len(set(requested_identifiers)) != len(requested_identifiers)
+        ):
             raise WeexRestBusinessError(code="invalid_response", message="WEEX batch response count did not match the request.", payload=payload)
+        requested_set = set(requested_identifiers)
+        response_by_identifier: dict[str, dict[str, Any]] = {}
+        for item in raw_items:
+            returned_identifier = _batch_response_identifier(item, identity_kind=identity_kind)
+            if (
+                returned_identifier is None
+                or returned_identifier not in requested_set
+                or returned_identifier in response_by_identifier
+            ):
+                raise WeexRestBusinessError(
+                    code="invalid_response",
+                    message="WEEX batch response identities did not uniquely match the request.",
+                    payload=payload,
+                )
+            response_by_identifier[returned_identifier] = item
+        if set(response_by_identifier) != requested_set:
+            raise WeexRestBusinessError(
+                code="invalid_response",
+                message="WEEX batch response identities did not cover the request.",
+                payload=payload,
+            )
         normalized: list[dict[str, Any]] = []
-        for item, requested_identifier in zip(raw_items, requested_identifiers, strict=True):
+        for requested_identifier in requested_identifiers:
+            item = response_by_identifier[requested_identifier]
             if action == "batch_order":
                 success = item.get("success") is True if market == "futures" else (
                     item.get("orderId") not in (None, "") and not item.get("errorCode") and not item.get("errorMsg")
@@ -1489,19 +1893,6 @@ def _normalize_mutation_result(
                 )
             if market == "futures" and item.get("success") not in {True, False}:
                 raise WeexRestBusinessError(code="invalid_response", message="WEEX batch item lacked a success boolean.", payload=payload)
-            returned_identifier = _batch_response_identifier(item, identity_kind=identity_kind)
-            if returned_identifier and returned_identifier != requested_identifier:
-                raise WeexRestBusinessError(
-                    code="invalid_response",
-                    message="WEEX batch response item did not match the requested identifier.",
-                    payload=payload,
-                )
-            if success and identity_kind != "spot_client_order_id" and not returned_identifier:
-                raise WeexRestBusinessError(
-                    code="invalid_response",
-                    message="WEEX batch success item lacked its requested identifier.",
-                    payload=payload,
-                )
             item_result = _normalized_item_result(item, success=success)
             item_result[
                 "requested_order_id" if identity_kind == "order_id" else "client_order_id"
@@ -1667,6 +2058,8 @@ def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> byte
         with urlopen(request, timeout=timeout_seconds) as response:
             return response.read()
     except HTTPError as exc:
+        if prepared.get("_mutation_action"):
+            raise
         error_body = exc.read()
         payload: Any | None = None
         if error_body:
@@ -1684,6 +2077,64 @@ def _default_transport(prepared: dict[str, Any], timeout_seconds: float) -> byte
             message="WEEX Trade API returned a non-success HTTP status.",
             payload=payload,
         ) from exc
+
+
+def _mutation_http_error(exc: HTTPError, *, details: dict[str, Any] | None) -> TradeMutationError:
+    error_body = exc.read()
+    upstream_code = f"http_{exc.code}"
+    explicit_rejection = False
+    if error_body:
+        try:
+            payload = json.loads(error_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if payload is not None:
+            try:
+                raise_for_weex_business_error(payload)
+            except WeexRestBusinessError as business_error:
+                upstream_code = business_error.safe_details()["upstream_code"]
+                explicit_rejection = True
+    conservative_unknown_statuses = {408, 409, 425, 429}
+    outcome_class = (
+        "definitive_rejection"
+        if explicit_rejection and 400 <= exc.code < 500 and exc.code not in conservative_unknown_statuses
+        else "unknown"
+    )
+    message = (
+        "WEEX explicitly rejected the mutation."
+        if outcome_class == "definitive_rejection"
+        else "WEEX mutation HTTP result is unknown."
+    )
+    return TradeMutationError(
+        code="upstream_error",
+        message=message,
+        outcome_class=outcome_class,
+        write_attempted=True,
+        details=_merge_safe_details(details, upstream_code=upstream_code, http_status=exc.code),
+    )
+
+
+def _mutation_unknown_error(
+    *,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> TradeMutationError:
+    return TradeMutationError(
+        code="upstream_error",
+        message=message,
+        outcome_class="unknown",
+        write_attempted=True,
+        details=dict(details or {}),
+    )
+
+
+def _merge_safe_details(
+    details: dict[str, Any] | None,
+    **extra: Any,
+) -> dict[str, Any]:
+    merged = dict(details or {})
+    merged.update({key: value for key, value in extra.items() if value not in (None, "")})
+    return merged
 
 
 def _compact_json(value: dict[str, Any]) -> str:
@@ -1749,19 +2200,28 @@ def _has_success_code(payload: Any, *, endpoint: str | None = None) -> bool:
     return code in SUCCESS_CODES or (endpoint in FUTURES_HTTP_200_SUCCESS_PATHS and code == "200")
 
 
-def _leverage_response_matches_request(*, request_body: dict[str, Any], response_payload: dict[str, Any]) -> bool:
+def _leverage_response_matches_request(
+    *,
+    request_body: dict[str, Any],
+    response_payload: dict[str, Any],
+    explicit_atomic: bool,
+) -> bool:
     symbol = request_body.get("symbol")
     margin_type = request_body.get("marginType")
-    if symbol in (None, "") or margin_type in (None, ""):
+    if symbol in (None, ""):
         return False
     if str(response_payload.get("symbol") or "").upper() != str(symbol).upper():
         return False
-    if str(response_payload.get("marginType") or "").upper() != str(margin_type).upper():
+    if margin_type not in (None, "") and str(response_payload.get("marginType") or "").upper() != str(margin_type).upper():
+        return False
+    leverage_fields = ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage")
+    expected = [(field, request_body.get(field)) for field in leverage_fields if request_body.get(field) not in (None, "")]
+    if explicit_atomic:
+        return bool(expected) and all(str(response_payload.get(field)) == str(value) for field, value in expected)
+    if margin_type in (None, ""):
         return False
     if str(margin_type).upper() == "CROSSED":
         return str(response_payload.get("crossLeverage")) == str(request_body.get("crossLeverage"))
-    leverage_fields = ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage")
-    expected = [(field, request_body.get(field)) for field in leverage_fields if request_body.get(field) not in (None, "")]
     return bool(expected) and all(str(response_payload.get(field)) == str(value) for field, value in expected)
 
 

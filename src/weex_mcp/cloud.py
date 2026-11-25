@@ -5,8 +5,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from .asgi_app import build_asgi_app
-from .service import build_default_service
+from .service import _route_approval_binding, build_default_service
 from .settings import Settings
+from .tool_registry import build_default_registry
 
 
 def build_cloud_app(
@@ -15,7 +16,16 @@ def build_cloud_app(
     """Build the stateless cloud ASGI application from validated environment settings."""
 
     settings = Settings.from_environment(environ, require_cloud=True)
-    service = build_default_service(settings=settings)
+    registry = build_default_registry(
+        enabled_modules={"broker", "market", "account", "trade"},
+        credential_modes={"plaintext"},
+    )
+    service = build_default_service(
+        settings=settings,
+        runtime_profile="broker_server",
+        registry=registry,
+        approval_binding=_route_approval_binding(host_kind="broker_server", settings=settings),
+    )
     return build_asgi_app(service=service)
 
 

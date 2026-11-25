@@ -2,6 +2,113 @@ import unittest
 
 
 class ToolSchemaTests(unittest.TestCase):
+    def test_registry_projection_filters_modules_and_credential_modes_without_cross_build_mutation(self):
+        from weex_mcp.tool_registry import build_default_registry
+
+        try:
+            local_registry = build_default_registry(
+                enabled_modules={"market", "account", "trade"},
+                credential_modes={"credential_ref"},
+            )
+        except TypeError as exc:
+            self.fail(f"registry projection API is missing: {exc}")
+        local_tools = {tool["name"]: tool for tool in local_registry.list_tools()}
+
+        self.assertEqual(len(local_tools), 50)
+        self.assertFalse(any(tool["_meta"]["com.weex/mcp"]["module"] == "broker" for tool in local_tools.values()))
+        self.assertFalse(local_registry.has_tool("broker_oauth_generate_authorization_url"))
+        self.assertIsNone(local_registry.get_tool("broker_oauth_exchange_code_for_api_key"))
+        local_credential = local_tools["account_get_balance"]["inputSchema"]["properties"]["credential"]
+        self.assertEqual([variant["properties"]["type"]["const"] for variant in local_credential["oneOf"]], ["credential_ref"])
+        self.assertNotIn("api_key", local_credential["properties"])
+
+        default_tools = {tool["name"]: tool for tool in build_default_registry().list_tools()}
+        default_credential = default_tools["account_get_balance"]["inputSchema"]["properties"]["credential"]
+        self.assertEqual(len(default_tools), 52)
+        self.assertEqual(
+            [variant["properties"]["type"]["const"] for variant in default_credential["oneOf"]],
+            ["credential_ref", "encrypted_envelope", "plaintext"],
+        )
+        self.assertIn("api_key", default_credential["properties"])
+
+    def test_registry_projection_rejects_empty_or_unknown_modules_and_credential_modes(self):
+        from weex_mcp.tool_registry import build_default_registry
+
+        invalid_cases = (
+            ({"enabled_modules": set()}, "enabled_modules"),
+            ({"enabled_modules": {"market", "unknown"}}, "enabled_modules"),
+            ({"credential_modes": set()}, "credential_modes"),
+            ({"credential_modes": {"plaintext", "unknown"}}, "credential_modes"),
+        )
+        for kwargs, message in invalid_cases:
+            with self.subTest(kwargs=kwargs):
+                try:
+                    with self.assertRaisesRegex(ValueError, message):
+                        build_default_registry(**kwargs)
+                except TypeError as exc:
+                    self.fail(f"registry projection API is missing: {exc}")
+
+    def test_delegated_authorization_is_explicitly_enabled_and_mutually_exclusive(self):
+        from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
+        from weex_mcp.tool_registry import build_default_registry
+
+        try:
+            registry = build_default_registry(
+                enabled_modules={"market", "account", "trade"},
+                credential_modes={"credential_ref"},
+                allow_delegated_authorization=True,
+            )
+        except TypeError as exc:
+            self.fail(f"delegated authorization schema support is missing: {exc}")
+        schema = registry.get_tool("trade_confirm_order").input_schema
+        self.assertNotIn("confirmation", schema["required"])
+        self.assertIn("delegated_authorization", schema["properties"])
+        self.assertEqual(schema["properties"]["delegated_authorization"]["required"], ["ref"])
+
+        base = {
+            "market": "spot",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": "0.001",
+            "client_order_id": "delegated-schema-id",
+            "credential": {"type": "credential_ref", "key_id": "key", "ref": "profile"},
+            "preview_id": "signed",
+        }
+        validate_tool_arguments(base | {"confirmation": {"accepted": True}}, schema)
+        validate_tool_arguments(base | {"delegated_authorization": {"ref": "authorization-ref"}}, schema)
+        for invalid in (
+            base,
+            base
+            | {
+                "confirmation": {"accepted": True},
+                "delegated_authorization": {"ref": "authorization-ref"},
+            },
+        ):
+            with self.assertRaises(SchemaValidationError):
+                validate_tool_arguments(invalid, schema)
+
+        default_schema = build_default_registry().get_tool("trade_confirm_order").input_schema
+        self.assertNotIn("delegated_authorization", default_schema["properties"])
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments(
+                {
+                    **base,
+                    "credential": {
+                        "type": "plaintext",
+                        "api_key": "AK",
+                        "api_secret": "SK",
+                        "api_passphrase": "PP",
+                    },
+                    "delegated_authorization": {"ref": "authorization-ref"},
+                },
+                default_schema,
+            )
+
+        with self.assertRaisesRegex(ValueError, "allow_delegated_authorization"):
+            build_default_registry(allow_delegated_authorization="true")
+
     def test_tool_output_schema_declares_preview_clarification_fields(self):
         from weex_mcp.tool_registry import build_default_registry
 
@@ -18,7 +125,7 @@ class ToolSchemaTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in build_default_registry().list_tools()}
 
         market_schema = tools["market_get_symbol_price"]["inputSchema"]
-        self.assertEqual(market_schema["required"], ["market", "symbol"])
+        self.assertEqual(market_schema["required"], ["market"])
         self.assertFalse(market_schema["additionalProperties"])
         self.assertEqual(market_schema["properties"]["market"]["enum"], ["spot", "futures"])
 
@@ -52,6 +159,7 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertNotIn("idempotency_key", confirm_schema["properties"])
         self.assertIn("preview_id", confirm_schema["properties"])
         self.assertIn("approval_token", confirm_schema["properties"])
+        self.assertNotIn("delegated_authorization", confirm_schema["properties"])
         self.assertEqual(confirm_schema["properties"]["confirmation"]["required"], ["accepted"])
         self.assertEqual(set(confirm_schema["properties"]["confirmation"]["properties"]), {"accepted"})
 
@@ -336,6 +444,272 @@ class ToolSchemaTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             validate_tool_arguments({"market": "futures", "symbol": "BTCUSDT", "price_type": "LAST"}, schema)
 
+    def test_t3_account_and_market_schemas_encode_host_independent_contracts(self):
+        from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
+        from weex_mcp.tool_registry import build_default_registry
+
+        tools = {tool["name"]: tool for tool in build_default_registry().list_tools()}
+        self.assertTrue(
+            {
+                "account_get_position",
+                "market_get_server_time",
+                "market_ping",
+            }.issubset(tools)
+        )
+
+        credential = {
+            "type": "credential_ref",
+            "key_id": "key",
+            "ref": "ref",
+        }
+        position = tools["account_get_position"]["inputSchema"]
+        self.assertEqual(
+            position["required"],
+            ["market", "trading_mode", "symbol", "credential"],
+        )
+        self.assertEqual(position["properties"]["market"]["enum"], ["futures"])
+        self.assertEqual(position["properties"]["trading_mode"]["enum"], ["live"])
+        validate_tool_arguments(
+            {
+                "market": "futures",
+                "trading_mode": "live",
+                "symbol": "BTCUSDT",
+                "credential": credential,
+            },
+            position,
+        )
+        for arguments in (
+            {"market": "spot", "trading_mode": "live", "symbol": "BTCUSDT", "credential": credential},
+            {"market": "futures", "trading_mode": "demo", "symbol": "BTCUSDT", "credential": credential},
+        ):
+            with self.subTest(tool="account_get_position", arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, position)
+
+        server_time = tools["market_get_server_time"]["inputSchema"]
+        self.assertEqual(server_time["required"], ["market"])
+        for market in ("spot", "futures"):
+            validate_tool_arguments({"market": market}, server_time)
+
+        ping = tools["market_ping"]["inputSchema"]
+        validate_tool_arguments({"market": "spot"}, ping)
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments({"market": "futures"}, ping)
+
+        symbol_price = tools["market_get_symbol_price"]["inputSchema"]
+        validate_tool_arguments({"market": "spot"}, symbol_price)
+        validate_tool_arguments(
+            {"market": "spot", "symbols": ["BTCUSDT", "ETHUSDT"]},
+            symbol_price,
+        )
+        for arguments in (
+            {"market": "spot", "symbol": "BTCUSDT", "symbols": ["ETHUSDT"]},
+            {"market": "futures", "symbols": ["BTCUSDT"]},
+            {"market": "spot", "symbols": []},
+            {"market": "spot", "symbols": ["BTCUSDT", "BTCUSDT"]},
+        ):
+            with self.subTest(tool="market_get_symbol_price", arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, symbol_price)
+
+        exchange_info = tools["market_get_exchange_info"]["inputSchema"]
+        validate_tool_arguments(
+            {
+                "market": "spot",
+                "symbols": ["BTCUSDT", "ETHUSDT"],
+                "symbol_status": "TRADING",
+            },
+            exchange_info,
+        )
+        for status in ("TRADING", "HALT", "BREAK"):
+            validate_tool_arguments(
+                {"market": "spot", "symbol_status": status},
+                exchange_info,
+            )
+        for arguments in (
+            {"market": "spot", "symbol": "BTCUSDT", "symbols": ["ETHUSDT"]},
+            {"market": "spot", "symbol_status": "UNKNOWN"},
+            {"market": "futures", "symbols": ["BTCUSDT"]},
+            {"market": "futures", "symbol_status": "TRADING"},
+        ):
+            with self.subTest(tool="market_get_exchange_info", arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, exchange_info)
+
+    def test_partner_schemas_are_typed_strict_local_user_contracts(self):
+        from jsonschema import Draft202012Validator
+
+        from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
+        from weex_mcp.tool_registry import build_default_registry
+
+        registry = build_default_registry(
+            enabled_modules={"partner"},
+            credential_modes={"credential_ref"},
+        )
+        tools = {tool["name"]: tool for tool in registry.list_tools()}
+        self.assertEqual(
+            set(tools),
+            {
+                "partner_get_affiliate_uids",
+                "partner_get_channel_user_trade_and_asset",
+                "partner_get_affiliate_commission",
+                "partner_query_sub_channel_transactions",
+                "partner_verify_referrals",
+                "partner_get_referral_assets",
+                "partner_get_referral_deal_data",
+            },
+        )
+        credential = {"type": "credential_ref", "key_id": "key", "ref": "ref"}
+        forbidden = {"endpoint", "path", "method", "base_url", "timeout", "locale"}
+        for name, tool in tools.items():
+            with self.subTest(name=name):
+                schema = tool["inputSchema"]
+                Draft202012Validator.check_schema(schema)
+                self.assertFalse(schema["additionalProperties"])
+                self.assertTrue(forbidden.isdisjoint(schema["properties"]))
+                self.assertEqual(tool["_meta"]["com.weex/mcp"]["module"], "partner")
+                self.assertEqual(tool["_meta"]["com.weex/mcp"]["permission"], "USER_DATA")
+                credential_schema = schema["properties"]["credential"]
+                self.assertEqual(
+                    [variant["properties"]["type"]["const"] for variant in credential_schema["oneOf"]],
+                    ["credential_ref"],
+                )
+
+        common = tools["partner_get_affiliate_uids"]["inputSchema"]
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "uid": "1",
+                "start_time": "0",
+                "end_time": "9223372036854775807",
+                "page": "1",
+                "page_size": "100",
+                "expected_environment": "partner_test",
+            },
+            common,
+        )
+        validate_tool_arguments(
+            {"credential": credential, "page": "9223372036854775808"},
+            common,
+        )
+        for arguments in (
+            {"credential": credential, "uid": "0"},
+            {"credential": credential, "uid": "01"},
+            {"credential": credential, "uid": "9223372036854775808"},
+            {"credential": credential, "start_time": "1"},
+            {"credential": credential, "page": "0"},
+            {"credential": credential, "page_size": "101"},
+            {"credential": credential, "expected_environment": "unknown"},
+        ):
+            with self.subTest(schema="common", arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, common)
+
+        commission = tools["partner_get_affiliate_commission"]["inputSchema"]
+        validate_tool_arguments(
+            {"credential": credential, "coin": "BTC", "product_type": "FUTURES"},
+            commission,
+        )
+        for field, value in (("coin", "ETH"), ("product_type", "MARGIN")):
+            with self.assertRaises(SchemaValidationError):
+                validate_tool_arguments({"credential": credential, field: value}, commission)
+
+        sub_channel = tools["partner_query_sub_channel_transactions"]["inputSchema"]
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "product_type": "SPOT",
+                "start_time": "0",
+                "end_time": "1",
+            },
+            sub_channel,
+        )
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "product_type": "FUTURES",
+                "start_time": None,
+                "end_time": None,
+                "expected_environment": "partner_test",
+            },
+            sub_channel,
+        )
+        for arguments in (
+            {
+                "credential": credential,
+                "product_type": "SPOT",
+                "start_time": None,
+                "end_time": None,
+            },
+            {
+                "credential": credential,
+                "product_type": "SPOT",
+                "start_time": None,
+                "end_time": None,
+                "expected_environment": "partner_production",
+            },
+            {
+                "credential": credential,
+                "product_type": "SPOT",
+                "start_time": None,
+                "end_time": "1",
+                "expected_environment": "partner_test",
+            },
+        ):
+            with self.subTest(schema="sub_channel", arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, sub_channel)
+
+        verify = tools["partner_verify_referrals"]["inputSchema"]
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "user_ids": [str(value) for value in range(1, 101)],
+                "expected_environment": "partner_test",
+            },
+            verify,
+        )
+        for user_ids in ([], ["1", "1"], ["0"], [str(value) for value in range(1, 102)]):
+            with self.subTest(schema="verify", user_ids=user_ids):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments({"credential": credential, "user_ids": user_ids}, verify)
+
+        assets = tools["partner_get_referral_assets"]["inputSchema"]
+        self.assertEqual(assets["required"], ["credential", "user_id", "start_time", "end_time"])
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "user_id": "1",
+                "start_time": "2026-01-01",
+                "end_time": "2026-01-31",
+                "expected_environment": "partner_production",
+            },
+            assets,
+        )
+        with self.assertRaises(SchemaValidationError):
+            validate_tool_arguments(
+                {
+                    "credential": credential,
+                    "user_id": "1",
+                    "start_time": "2026-1-1",
+                    "end_time": "2026-01-31",
+                },
+                assets,
+            )
+
+        deal = tools["partner_get_referral_deal_data"]["inputSchema"]
+        self.assertNotIn("maxItems", deal["properties"]["user_ids"])
+        validate_tool_arguments(
+            {
+                "credential": credential,
+                "user_ids": [str(value) for value in range(1, 102)],
+                "start_time": "2026-01-01",
+                "end_time": "2026-01-31",
+                "expected_environment": "partner_test",
+            },
+            deal,
+        )
+
     def test_credential_schema_self_describes_all_strict_variants(self):
         from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
         from weex_mcp.tool_registry import build_default_registry
@@ -399,6 +773,78 @@ class ToolSchemaTests(unittest.TestCase):
         self.assertEqual(cancel_schema["properties"]["trading_mode"]["enum"], ["live"])
         self.assertNotIn("module", tools["trade_preview_order"]["annotations"])
         self.assertIn("_meta", tools["trade_preview_order"])
+
+    def test_leverage_schema_supports_simple_and_explicit_atomic_modes(self):
+        from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments
+        from weex_mcp.tool_registry import build_default_registry
+
+        tools = {tool["name"]: tool for tool in build_default_registry().list_tools()}
+        preview = tools["trade_preview_leverage"]["inputSchema"]
+        confirm = tools["trade_confirm_leverage"]["inputSchema"]
+        self.assertTrue(preview["x-weex-deferConditionalValidation"])
+        self.assertTrue(confirm["x-weex-deferConditionalValidation"])
+        credential = {
+            "type": "plaintext",
+            "api_key": "AK",
+            "api_secret": "SK",
+            "api_passphrase": "PP",
+        }
+        base = {
+            "market": "futures",
+            "trading_mode": "live",
+            "symbol": "BTCUSDT",
+            "credential": credential,
+        }
+        valid = (
+            base | {"margin_mode": "cross", "leverage": "5"},
+            base | {"margin_mode": "isolated", "position_side": "LONG", "leverage": "3"},
+            base | {"cross_leverage": "2"},
+            base | {"margin_mode": "isolated", "isolated_long_leverage": "3"},
+            base
+            | {
+                "margin_mode": "cross",
+                "cross_leverage": "2",
+                "isolated_long_leverage": "3",
+                "isolated_short_leverage": "4",
+            },
+        )
+        for arguments in valid:
+            with self.subTest(arguments=arguments):
+                validate_tool_arguments(arguments, preview)
+
+        invalid = (
+            base,
+            base | {"margin_mode": "cross"},
+            base | {"margin_mode": "cross", "leverage": "5", "cross_leverage": "2"},
+            base | {"position_side": "LONG", "isolated_long_leverage": "3"},
+            base | {"cross_leverage": "0"},
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(SchemaValidationError):
+                    validate_tool_arguments(arguments, preview)
+
+        validate_tool_arguments(base, preview, defer_conditional=True)
+        validate_tool_arguments(
+            base
+            | {
+                "preview_id": "signed",
+                "confirmation": {"accepted": True},
+            },
+            confirm,
+            defer_conditional=True,
+        )
+
+        validate_tool_arguments(
+            base
+            | {
+                "cross_leverage": "2",
+                "isolated_short_leverage": "4",
+                "preview_id": "signed",
+                "confirmation": {"accepted": True},
+            },
+            confirm,
+        )
 
     def test_trade_cancel_schema_binds_an_order_identity_without_symbol(self):
         from weex_mcp.schema_validation import SchemaValidationError, validate_tool_arguments

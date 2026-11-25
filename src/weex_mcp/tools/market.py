@@ -8,17 +8,40 @@ from ..response import error_response, ok_response
 
 
 def get_symbol_price(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
-    missing = _missing_fields(arguments, ("market", "symbol"))
+    missing = _missing_fields(arguments, ("market",))
     if missing:
         return error_response("missing_fields", "Market price query is missing required fields.", details={"fields": missing})
-    market = arguments["market"]
-    symbol = arguments["symbol"]
-    try:
-        data = adapter.get_symbol_price(
-            market=str(market).lower(),
-            symbol=normalize_market_symbol(str(symbol)),
-            price_type=arguments.get("price_type"),
+    symbol = arguments.get("symbol")
+    symbols = arguments.get("symbols")
+    has_symbol = symbol not in (None, "")
+    has_symbols = symbols is not None
+    market = str(arguments["market"]).lower()
+    if not has_symbol and not has_symbols and market != "spot":
+        return error_response(
+            "missing_fields",
+            "Market price query is missing required fields.",
+            details={"fields": ["symbol", "symbols"]},
         )
+    if has_symbol and has_symbols:
+        return error_response("invalid_arguments", "symbol and symbols are mutually exclusive.")
+    try:
+        if has_symbols:
+            data = adapter.get_symbol_price(
+                market=market,
+                symbols=_normalize_symbols(symbols),
+                price_type=arguments.get("price_type"),
+            )
+        elif has_symbol:
+            data = adapter.get_symbol_price(
+                market=market,
+                symbol=normalize_market_symbol(str(symbol)),
+                price_type=arguments.get("price_type"),
+            )
+        else:
+            data = adapter.get_symbol_price(
+                market=market,
+                price_type=arguments.get("price_type"),
+            )
     except ValueError as exc:
         return error_response("invalid_arguments", str(exc))
     except WeexRestBusinessError as exc:
@@ -67,11 +90,40 @@ def get_exchange_info(arguments: dict[str, Any], *, adapter: MarketPriceAdapter)
     if missing:
         return error_response("missing_fields", "Market exchange-info query is missing required fields.", details={"fields": missing})
     symbol = arguments.get("symbol")
+    symbols = arguments.get("symbols")
+    if symbol not in (None, "") and symbols is not None:
+        return error_response("invalid_arguments", "symbol and symbols are mutually exclusive.")
+    market = str(arguments["market"]).lower()
+    if symbols is not None or arguments.get("symbol_status") is not None:
+        return _call_market_adapter(
+            lambda: adapter.get_exchange_info(
+                market=market,
+                symbol=normalize_market_symbol(str(symbol)) if symbol else None,
+                symbols=_normalize_symbols(symbols) if symbols is not None else None,
+                symbol_status=arguments.get("symbol_status"),
+            )
+        )
     return _call_market_adapter(
         lambda: adapter.get_exchange_info(
-            market=str(arguments["market"]).lower(),
+            market=market,
             symbol=normalize_market_symbol(str(symbol)) if symbol else None,
         )
+    )
+
+
+def get_server_time(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market",),
+        call=lambda: adapter.get_server_time(market=str(arguments["market"]).lower()),
+    )
+
+
+def ping(arguments: dict[str, Any], *, adapter: MarketPriceAdapter) -> dict[str, Any]:
+    return _call_market_with_fields(
+        arguments,
+        required=("market",),
+        call=lambda: adapter.ping(market=str(arguments["market"]).lower()),
     )
 
 
@@ -172,6 +224,17 @@ def _call_market_with_fields(arguments: dict[str, Any], *, required: tuple[str, 
 
 def _optional_symbol(value: Any) -> str | None:
     return normalize_market_symbol(str(value)) if value not in (None, "") else None
+
+
+def _normalize_symbols(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("symbols must be a non-empty array.")
+    if not all(isinstance(symbol, str) for symbol in value):
+        raise ValueError("symbols must contain only strings.")
+    normalized = [normalize_market_symbol(symbol) for symbol in value]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("symbols must contain unique symbols.")
+    return normalized
 
 
 def _call_market_adapter(call: Any) -> dict[str, Any]:

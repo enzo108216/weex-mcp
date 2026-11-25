@@ -39,6 +39,21 @@ def get_positions(arguments: dict[str, Any], context: TenantContext, *, adapter:
     )
 
 
+def get_position(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
+    return _call_account_adapter(
+        arguments,
+        context,
+        required_fields=("market", "trading_mode", "symbol"),
+        call=lambda credential_argument: adapter.get_position(
+            market=str(arguments["market"]),
+            trading_mode=str(arguments["trading_mode"]),
+            symbol=str(arguments["symbol"]),
+            credential_argument=credential_argument,
+            context=context,
+        ),
+    )
+
+
 def get_orders(arguments: dict[str, Any], context: TenantContext, *, adapter: AccountAdapter) -> dict[str, Any]:
     return _call_account_adapter(
         arguments,

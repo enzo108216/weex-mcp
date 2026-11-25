@@ -266,7 +266,7 @@ class TradeAdapterTests(unittest.TestCase):
         self.assertEqual(captured["timeout_seconds"], 3.0)
 
     def test_demo_confirm_rejects_exchange_business_error(self):
-        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+        from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.adapters.trade_rest import WeexFuturesTradeRestAdapter
         from weex_mcp.trade_execution import TradeExecution
 
@@ -293,13 +293,14 @@ class TradeAdapterTests(unittest.TestCase):
             risk={},
         )
 
-        with self.assertRaises(WeexRestBusinessError):
+        with self.assertRaises(TradeMutationError) as raised:
             adapter.confirm_order(
                 execution=preview,
                 credential=self._credential(),
                 credential_argument=self._credential_argument(),
                 context=self._context(),
             )
+        self.assertEqual(raised.exception.outcome_class, "definitive_rejection")
 
     def test_live_trading_preview_fails_closed(self):
         from weex_mcp.adapters.trade_rest import WeexFuturesTradeRestAdapter

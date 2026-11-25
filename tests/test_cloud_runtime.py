@@ -55,6 +55,109 @@ class CloudRuntimeTests(unittest.TestCase):
 
             Settings.from_environment({"WEEX_APPROVAL_TOKEN_SECRET": "S" * 48}, require_cloud=True)
 
+    def test_cloud_app_builds_broker_catalog_with_plaintext_credentials(self):
+        from weex_mcp.cloud import build_cloud_app
+
+        with patch("weex_mcp.cloud.build_asgi_app", side_effect=lambda *, service: service):
+            service = build_cloud_app(self._cloud_env())
+
+        listed = service.handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": "broker-list", "method": "tools/list", "params": {}}
+        )
+        tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+        self.assertEqual(len(tools), 26)
+        self.assertIn("broker_oauth_generate_authorization_url", tools)
+        self.assertIn("broker_oauth_exchange_code_for_api_key", tools)
+        credential = tools["account_get_balance"]["inputSchema"]["properties"]["credential"]
+        self.assertEqual([variant["properties"]["type"]["const"] for variant in credential["oneOf"]], ["plaintext"])
+        self.assertNotIn("ref", credential["properties"])
+        discovered = service.handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": "broker-discover", "method": "server/discover", "params": {}}
+        )
+        self.assertTrue(discovered["result"]["instructions"].startswith("WEEX MCP tools"))
+        self.assertIn("Broker OAuth", discovered["result"]["instructions"])
+        self.assertNotIn("preview/confirm trading", discovered["result"]["instructions"])
+
+        with patch("weex_mcp.cloud.build_asgi_app", side_effect=lambda *, service: service):
+            trade_service = build_cloud_app(self._cloud_env() | {"WEEX_TRADE_ENABLED": "true"})
+        trade_listed = trade_service.handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": "broker-trade-list", "method": "tools/list", "params": {}}
+        )
+        self.assertEqual(len(trade_listed["result"]["tools"]), 52)
+        trade_tools = {tool["name"]: tool for tool in trade_listed["result"]["tools"]}
+        self.assertNotIn(
+            "delegated_authorization",
+            trade_tools["trade_confirm_order"]["inputSchema"]["properties"],
+        )
+        trade_discovered = trade_service.handle_jsonrpc(
+            {"jsonrpc": "2.0", "id": "broker-trade-discover", "method": "server/discover", "params": {}}
+        )
+        self.assertIn("preview/confirm trading", trade_discovered["result"]["instructions"])
+
+    def test_cloud_broker_rejects_credential_ref_before_account_adapter(self):
+        from weex_mcp.cloud import build_cloud_app
+
+        class AccountAdapter:
+            calls = 0
+
+            def get_balance(self, **_kwargs):
+                self.calls += 1
+                return {"balances": []}
+
+        adapter = AccountAdapter()
+        with (
+            patch("weex_mcp.service.WeexAccountRestAdapter", return_value=adapter),
+            patch("weex_mcp.cloud.build_asgi_app", side_effect=lambda *, service: service),
+        ):
+            service = build_cloud_app(self._cloud_env())
+
+        response = service.handle_jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": "broker-ref",
+                "method": "tools/call",
+                "params": {
+                    "name": "account_get_balance",
+                    "arguments": {
+                        "market": "spot",
+                        "trading_mode": "live",
+                        "credential": {
+                            "type": "credential_ref",
+                            "key_id": "key",
+                            "ref": "ref",
+                        },
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(response["result"]["structuredContent"]["error"]["code"], "invalid_arguments")
+        self.assertEqual(adapter.calls, 0)
+
+    def test_cloud_approval_binding_identifies_broker_without_raw_origins(self):
+        from weex_mcp.cloud import build_cloud_app
+
+        environment = self._cloud_env() | {
+            "WEEX_SPOT_BASE_URL": "https://stg-spot.weex.tech/",
+            "WEEX_FUTURES_BASE_URL": "https://stg-futures.weex.tech/",
+        }
+        with patch("weex_mcp.cloud.build_asgi_app", side_effect=lambda *, service: service):
+            service = build_cloud_app(environment)
+        token = service.approval_codec.issue(
+            action="order",
+            credential_fingerprint="fp_credential",
+            summary={"action": "order"},
+            risk={"status": "review_required"},
+            risk_signature="risk-1",
+        )
+
+        binding = service.approval_codec.verify(token)["binding"]
+        self.assertEqual(binding.get("host_kind"), "broker_server")
+        self.assertTrue(str(binding.get("route_fingerprint") or "").startswith("fp_"))
+        serialized = json.dumps(binding, sort_keys=True)
+        self.assertNotIn("stg-spot.weex.tech", serialized)
+        self.assertNotIn("stg-futures.weex.tech", serialized)
+
     def test_cloud_environment_parses_and_redacts_sensitive_settings(self):
         from weex_mcp.settings import Settings
 

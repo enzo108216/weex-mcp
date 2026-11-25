@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -102,7 +103,12 @@ class PlaintextSecretProvider:
             # granted to an inline API key. The signed endpoint adapter adds
             # verified permissions after authenticating the credential.
             permissions=frozenset(),
-            fingerprint=make_fingerprint("resolved_weex_api_key", api_key),
+            fingerprint=_credential_version_fingerprint(
+                key_id="inline",
+                api_key=api_key,
+                api_secret=api_secret,
+                api_passphrase=api_passphrase,
+            ),
         )
 
 
@@ -179,5 +185,31 @@ class StaticMappingSecretProvider:
             api_secret=api_secret,
             api_passphrase=api_passphrase,
             permissions=permissions,
-            fingerprint=make_fingerprint("resolved_weex_api_key", context_credential.key_id, api_key),
+            fingerprint=_credential_version_fingerprint(
+                key_id=context_credential.key_id,
+                api_key=api_key,
+                api_secret=api_secret,
+                api_passphrase=api_passphrase,
+            ),
         )
+
+
+def _credential_version_fingerprint(
+    *,
+    key_id: str,
+    api_key: str,
+    api_secret: str,
+    api_passphrase: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "key_id": key_id,
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "api_passphrase": api_passphrase,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return make_fingerprint("resolved_weex_credential_version", canonical)

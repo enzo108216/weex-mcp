@@ -30,6 +30,7 @@ def error_response(
     *,
     details: Any | None = None,
     audit: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code, "message": message}
     if details is not None:
@@ -37,6 +38,8 @@ def error_response(
     result: dict[str, Any] = {"ok": False, "error": error}
     if audit:
         result["audit"] = audit
+    if outcome is not None:
+        result["outcome"] = outcome
     return redact_secrets(result)
 
 

@@ -275,6 +275,244 @@ class MarketAdapterTests(unittest.TestCase):
         self.assertIn("priceType=MARK", requested_urls[1][0])
         self.assertEqual(futures["source"], "weex_public_rest")
 
+    def test_server_time_and_ping_use_fixed_public_endpoints_and_strict_success_evidence(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        attempts = []
+
+        def fake_transport(url, timeout_seconds):
+            attempts.append(url)
+            if len(attempts) == 1:
+                raise TimeoutError("retry")
+            if url.endswith("/api/v3/time"):
+                return b'{"serverTime":1700000000000}'
+            if url.endswith("/capi/v3/market/time"):
+                return b'{"serverTime":"1700000000001"}'
+            if url.endswith("/api/v3/ping"):
+                return b"{}"
+            raise AssertionError(url)
+
+        adapter = WeexMarketRestAdapter(
+            transport=fake_transport,
+            max_attempts=2,
+            retry_base_delay_seconds=0,
+            sleep_func=lambda delay: None,
+        )
+        spot_time = adapter.get_server_time(market="spot")
+        futures_time = adapter.get_server_time(market="futures")
+        ping = adapter.ping(market="spot")
+
+        self.assertEqual(attempts[:2], ["https://api-spot.weex.com/api/v3/time"] * 2)
+        self.assertEqual(attempts[2], "https://api-contract.weex.com/capi/v3/market/time")
+        self.assertEqual(attempts[3], "https://api-spot.weex.com/api/v3/ping")
+        self.assertEqual(spot_time["server_time"], 1_700_000_000_000)
+        self.assertEqual(spot_time["endpoint"], "spot.config.get_server_time")
+        self.assertEqual(futures_time["server_time"], 1_700_000_000_001)
+        self.assertEqual(futures_time["endpoint"], "market.get_server_time")
+        self.assertTrue(ping["reachable"])
+        self.assertEqual(ping["endpoint"], "spot.config.ping")
+        self.assertEqual(ping["raw"], {})
+
+        invalid_times = (True, 1.5, -1, 9_223_372_036_854_775_808, "01")
+        for server_time in invalid_times:
+            with self.subTest(server_time=server_time):
+                invalid_adapter = WeexMarketRestAdapter(
+                    transport=lambda url, timeout, server_time=server_time: json.dumps(
+                        {"serverTime": server_time}
+                    ).encode()
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.get_server_time(market="spot")
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+        for body in (b"[]", b'{"ok":true}', b'{"data":{}}'):
+            with self.subTest(ping_body=body):
+                invalid_adapter = WeexMarketRestAdapter(
+                    transport=lambda url, timeout, body=body: body
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.ping(market="spot")
+                self.assertEqual(ctx.exception.code, "invalid_response")
+        with self.assertRaises(ValueError):
+            adapter.ping(market="futures")
+
+    def test_spot_exchange_info_maps_typed_filters_and_requires_response_coverage(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        requested_urls = []
+
+        def fake_transport(url, timeout_seconds):
+            requested_urls.append(url)
+            return json.dumps(
+                {
+                    "symbols": [
+                        {"symbol": "BTCUSDT", "status": "TRADING"},
+                        {"symbol": "ETHUSDT", "status": "TRADING"},
+                    ]
+                }
+            ).encode()
+
+        adapter = WeexMarketRestAdapter(transport=fake_transport)
+        result = adapter.get_exchange_info(
+            market="spot",
+            symbols=["btc/usdt", "ETHUSDT"],
+            symbol_status="TRADING",
+        )
+
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api-spot.weex.com/api/v3/exchangeInfo?"
+                "symbols=%5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D&symbolStatus=TRADING"
+            ],
+        )
+        self.assertIsNone(result["symbol"])
+        self.assertEqual(result["symbol_status"], "TRADING")
+        self.assertEqual([item["symbol"] for item in result["symbols"]], ["BTCUSDT", "ETHUSDT"])
+
+        invalid_responses = (
+            b'{"symbols":[{"symbol":"BTCUSDT","status":"TRADING"}]}',
+            b'{"symbols":[{"symbol":"BTCUSDT","status":"TRADING"},{"symbol":"ETHUSDT","status":"HALT"}]}',
+        )
+        for body in invalid_responses:
+            with self.subTest(body=body):
+                invalid_adapter = WeexMarketRestAdapter(
+                    transport=lambda url, timeout, body=body: body
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.get_exchange_info(
+                        market="spot",
+                        symbols=["BTCUSDT", "ETHUSDT"],
+                        symbol_status="TRADING",
+                    )
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+        for call in (
+            lambda: adapter.get_exchange_info(market="spot", symbol="BTCUSDT", symbols=["ETHUSDT"]),
+            lambda: adapter.get_exchange_info(market="futures", symbols=["BTCUSDT"]),
+            lambda: adapter.get_exchange_info(market="futures", symbol_status="TRADING"),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaises(ValueError):
+                    call()
+
+    def test_spot_multi_symbol_price_requires_unique_exact_identity_coverage(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        requested_urls = []
+        response_body = b'[{"symbol":"ETHUSDT","price":"2"},{"symbol":"BTCUSDT","price":"1"}]'
+        adapter = WeexMarketRestAdapter(
+            transport=lambda url, timeout: requested_urls.append(url) or response_body
+        )
+        result = adapter.get_symbol_price(
+            market="spot",
+            symbols=["btc/usdt", "ETHUSDT"],
+        )
+
+        self.assertEqual(
+            requested_urls,
+            [
+                "https://api-spot.weex.com/api/v3/market/ticker/price?"
+                "symbols=%5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D"
+            ],
+        )
+        self.assertEqual(result["market"], "spot")
+        self.assertEqual(result["symbols"], ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(
+            result["prices"],
+            [
+                {"symbol": "ETHUSDT", "price": "2"},
+                {"symbol": "BTCUSDT", "price": "1"},
+            ],
+        )
+        self.assertEqual(result["raw"], json.loads(response_body))
+
+        invalid_bodies = (
+            b"[]",
+            b'[{"symbol":"BTCUSDT","price":"1"}]',
+            b'[{"symbol":"BTCUSDT","price":"1"},{"symbol":"ETHUSDT","price":"2"},{"symbol":"XRPUSDT","price":"3"}]',
+            b'[{"symbol":"BTCUSDT","price":"1"},{"symbol":"BTCUSDT","price":"2"}]',
+            b'[{"symbol":"BTCUSDT","price":"1"},"ETHUSDT"]',
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body):
+                invalid_adapter = WeexMarketRestAdapter(
+                    transport=lambda url, timeout, body=body: body
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.get_symbol_price(
+                        market="spot",
+                        symbols=["BTCUSDT", "ETHUSDT"],
+                    )
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+        with self.assertRaises(ValueError):
+            adapter.get_symbol_price(market="spot", symbol="BTCUSDT", symbols=["ETHUSDT"])
+        with self.assertRaises(ValueError):
+            adapter.get_symbol_price(market="futures", symbols=["BTCUSDT"])
+
+    def test_spot_all_symbol_price_uses_empty_query_and_requires_unique_valid_prices(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+        from weex_mcp.adapters.rest_errors import WeexRestBusinessError
+
+        requested_urls = []
+        response_body = b'[{"symbol":"BTCUSDT","price":"1"},{"symbol":"ETHUSDT","price":"2"}]'
+        adapter = WeexMarketRestAdapter(
+            transport=lambda url, timeout: requested_urls.append(url) or response_body
+        )
+        result = adapter.get_symbol_price(market="spot")
+
+        self.assertEqual(
+            requested_urls,
+            ["https://api-spot.weex.com/api/v3/market/ticker/price"],
+        )
+        self.assertEqual(
+            result["prices"],
+            [
+                {"symbol": "BTCUSDT", "price": "1"},
+                {"symbol": "ETHUSDT", "price": "2"},
+            ],
+        )
+        self.assertEqual(result["raw"], json.loads(response_body))
+        self.assertNotIn("symbol", result)
+        self.assertNotIn("symbols", result)
+
+        invalid_bodies = (
+            b"[]",
+            b'[{"symbol":"BTCUSDT","price":"1"},{"symbol":"BTCUSDT","price":"2"}]',
+            b'[{"price":"1"}]',
+            b'[{"symbol":true,"price":"1"}]',
+            b'[{"symbol":123,"price":"1"}]',
+            b'[{"symbol":"BTCUSDT","price":"0"}]',
+            b'[{"symbol":"BTCUSDT","price":"1"},"ETHUSDT"]',
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body):
+                invalid_adapter = WeexMarketRestAdapter(
+                    transport=lambda url, timeout, body=body: body
+                )
+                with self.assertRaises(WeexRestBusinessError) as ctx:
+                    invalid_adapter.get_symbol_price(market="spot")
+                self.assertEqual(ctx.exception.code, "invalid_response")
+
+        with self.assertRaises(ValueError):
+            adapter.get_symbol_price(market="futures")
+
+    def test_single_symbol_price_legacy_shape_remains_unchanged(self):
+        from weex_mcp.adapters.market import WeexMarketRestAdapter
+
+        adapter = WeexMarketRestAdapter(
+            transport=lambda url, timeout: b'{"symbol":"BTCUSDT","price":"1"}'
+        )
+        result = adapter.get_symbol_price(market="spot", symbol="BTCUSDT")
+
+        self.assertEqual(result["symbol"], "BTCUSDT")
+        self.assertEqual(result["price"], "1")
+        self.assertNotIn("prices", result)
+
     def test_spot_price_rejects_price_type_and_futures_accepts_only_catalog_values(self):
         from weex_mcp.adapters.market import WeexMarketRestAdapter
 

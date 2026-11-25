@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .trade_execution import canonical_payload_bytes
@@ -26,6 +26,7 @@ class ApprovalTokenCodec:
         secret: str,
         ttl_seconds: int = 300,
         time_func: Callable[[], float] | None = None,
+        binding: Mapping[str, Any] | None = None,
     ):
         secret_bytes = secret.encode("utf-8")
         if len(secret_bytes) < 32:
@@ -35,6 +36,8 @@ class ApprovalTokenCodec:
         self._secret = secret_bytes
         self._ttl_seconds = ttl_seconds
         self._time_func = time_func or time.time
+        self._binding = _canonical_binding(binding)
+        self._version = 2 if self._binding else 1
 
     def issue(
         self,
@@ -47,7 +50,7 @@ class ApprovalTokenCodec:
     ) -> str:
         issued_at = int(self._time_func())
         claims = {
-            "v": 1,
+            "v": self._version,
             "action": action,
             "credential_fingerprint": credential_fingerprint,
             "issued_at": issued_at,
@@ -56,6 +59,8 @@ class ApprovalTokenCodec:
             "risk": risk,
             "risk_signature": risk_signature,
         }
+        if self._version == 2:
+            claims["binding"] = self._binding
         try:
             payload = canonical_payload_bytes(claims)
         except (TypeError, ValueError, OverflowError):
@@ -86,6 +91,10 @@ class ApprovalTokenCodec:
             raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.") from None
         if not _valid_claims(claims):
             raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.")
+        if claims["v"] != self._version:
+            raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.")
+        if self._version == 2 and claims["binding"] != self._binding:
+            raise ApprovalTokenError("approval_token_invalid", "Approval token is invalid.")
         now = int(self._time_func())
         if now >= claims["expires_at"]:
             raise ApprovalTokenError("approval_token_expired", "Approval token has expired.")
@@ -95,7 +104,7 @@ class ApprovalTokenCodec:
 
 
 def _valid_claims(claims: Any) -> bool:
-    if not isinstance(claims, dict) or claims.get("v") != 1:
+    if not isinstance(claims, dict) or claims.get("v") not in {1, 2}:
         return False
     if not all(isinstance(claims.get(field), str) and claims[field] for field in ("action", "credential_fingerprint", "risk_signature")):
         return False
@@ -105,7 +114,25 @@ def _valid_claims(claims: Any) -> bool:
         return False
     if claims["expires_at"] <= claims["issued_at"]:
         return False
-    return isinstance(claims.get("summary"), dict) and isinstance(claims.get("risk"), dict)
+    if claims["v"] == 1 and "binding" in claims:
+        return False
+    if claims["v"] == 2 and (not isinstance(claims.get("binding"), dict) or not claims["binding"]):
+        return False
+    return (
+        isinstance(claims.get("summary"), dict)
+        and isinstance(claims.get("risk"), dict)
+    )
+
+
+def _canonical_binding(binding: Mapping[str, Any] | None) -> dict[str, Any]:
+    if binding is None:
+        return {}
+    if not isinstance(binding, Mapping):
+        raise ValueError("approval binding must be a JSON object.")
+    try:
+        return json.loads(canonical_payload_bytes(dict(binding)).decode("utf-8"))
+    except (TypeError, ValueError, OverflowError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("approval binding must be a JSON object.") from None
 
 
 def _encode(value: bytes) -> str:
