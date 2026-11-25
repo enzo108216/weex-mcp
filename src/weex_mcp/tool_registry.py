@@ -1139,6 +1139,27 @@ def build_default_registry(
     futures_batch_item["required"].append("position_side")
     futures_batch_item["properties"]["position_side"] = {"type": "string", "enum": ["LONG", "SHORT", "long", "short"]}
     futures_batch_item["properties"]["time_in_force"]["enum"].extend(["POST_ONLY", "post_only"])
+    for field in (
+        "tp_trigger_price",
+        "sl_trigger_price",
+        "tp_working_type",
+        "sl_working_type",
+    ):
+        futures_batch_item["properties"][field] = deepcopy(
+            trade_preview_schema["properties"][field]
+        )
+    futures_batch_item["allOf"] = [
+        {
+            "oneOf": [
+                {"not": {"required": [working]}},
+                {"required": [trigger, working]},
+            ]
+        }
+        for trigger, working in (
+            ("tp_trigger_price", "tp_working_type"),
+            ("sl_trigger_price", "sl_working_type"),
+        )
+    ]
     trade_batch_order_preview_schema: dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
