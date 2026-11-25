@@ -13,6 +13,12 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(spec, "weex_mcp.local composition module is missing")
         return importlib.import_module("weex_mcp.local")
 
+    def test_local_module_exposes_pure_request_description_api(self):
+        local = self._local_module()
+
+        self.assertTrue(callable(local.describe_request))
+        self.assertIn("describe_request", local.__all__)
+
     def _build_service(self, *, trade_enabled: bool, account_adapter=None, partner_adapter=None):
         from weex_mcp.secret_provider import UnconfiguredSecretProvider
         from weex_mcp.settings import Settings

@@ -121,6 +121,13 @@ OAuth, and enables delegated authorization fields only when Trade tools are
 enabled. The host remains responsible for resolving refs without placing
 plaintext credentials in MCP arguments.
 
+Local embedding hosts can call `weex_mcp.local.describe_request` with a typed
+Market, Account, or Trade-preview tool name and arguments to obtain the exact
+method, route, canonical query/body, and redacted headers without constructing
+a service, resolving credentials, signing, or opening a network connection.
+This library-only API is not registered as an MCP tool. Partner, Broker OAuth,
+Trade-confirm, and state-dependent simple leverage requests fail closed.
+
 ### Broker Server composition
 
 `weex-mcp serve` uses the `broker_server` runtime profile. Broker Server accepts

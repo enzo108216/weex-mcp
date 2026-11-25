@@ -17,6 +17,12 @@ results, or user sessions. Credential refs or plaintext Account, Partner, and
 Trade credentials and Broker OAuth client values are supplied per request and
 used only for that request.
 
+The Local User module also exposes a library-only `describe_request` helper for
+typed Market, Account, and Trade-preview calls. It returns a redacted request
+description without building a service, reading credentials or approval keys,
+signing, or using a transport. It is not available through stdio or HTTP and
+does not expand either Host's tool catalog.
+
 ## Required cloud configuration
 
 | Environment variable | Required | Default | Meaning |

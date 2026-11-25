@@ -6,6 +6,7 @@ from .adapters.partner import PartnerAdapter
 from .adapters.trade_guard import TradeGuardAdapter
 from .audit import AuditSink
 from .execution_authorization import ExecutionAuthorizer
+from .request_description import RequestDescriptionError, describe_request
 from .secret_provider import SecretProvider
 from .service import McpService, _route_approval_binding, build_default_service
 from .settings import Settings
@@ -45,4 +46,8 @@ def build_local_user_service(
     )
 
 
-__all__ = ["build_local_user_service"]
+__all__ = [
+    "RequestDescriptionError",
+    "build_local_user_service",
+    "describe_request",
+]

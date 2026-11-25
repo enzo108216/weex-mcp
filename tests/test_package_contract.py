@@ -57,6 +57,8 @@ class PackageContractTests(unittest.TestCase):
         self.assertTrue((ROOT / ".gitignore").is_file())
         readme = (ROOT / "README.md").read_text()
         self.assertIn("build_default_service", readme)
+        self.assertIn("weex_mcp.local.describe_request", readme)
+        self.assertIn("library-only API", readme)
         self.assertIn("host", readme.lower())
         self.assertIn("not", readme.lower())
 

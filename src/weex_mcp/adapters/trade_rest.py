@@ -59,6 +59,10 @@ FUTURES_HTTP_200_SUCCESS_PATHS = {
 PreparedTransport = Callable[[dict[str, Any], float], bytes]
 
 
+class TradeRequestBindingRequiresLiveState(ValueError):
+    """Raised when a zero-network description cannot determine the final wire request."""
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(
         self,
@@ -118,10 +122,10 @@ class WeexTradeRestAdapter:
         context: TenantContext,
     ) -> dict[str, Any]:
         self._credential_for_request(credential, credential_argument, context)
-        market, trading_mode = _normalize_market_mode(arguments)
-        if market == "spot" and trading_mode == "demo":
-            raise ValueError("Spot demo orders are not supported by the WEEX API catalog.")
-        body = _build_order_body(arguments, market=market, trading_mode=trading_mode)
+        binding = build_trade_request_binding("order", arguments)
+        market = str(binding["market"])
+        trading_mode = str(binding["trading_mode"])
+        body = dict(binding["body"])
         catalog_symbol = _normalize_catalog_symbol(
             arguments.get("symbol"),
             market=market,
@@ -133,12 +137,11 @@ class WeexTradeRestAdapter:
             market=market,
         )
         _validate_order_rules(body, symbol_rule, market=market)
-        endpoint = _order_path(market=market, trading_mode=trading_mode)
         return _preview(
             action="order",
             market=market,
             trading_mode=trading_mode,
-            endpoint=endpoint,
+            endpoint=str(binding["path"]),
             body=body,
             risk_alerts=["live_order_requires_confirmation"]
             if trading_mode == "live"
@@ -201,22 +204,13 @@ class WeexTradeRestAdapter:
         context: TenantContext,
     ) -> dict[str, Any]:
         self._credential_for_request(credential, credential_argument, context)
-        market, trading_mode = _normalize_market_mode(arguments)
-        if trading_mode != "live":
-            raise ValueError("WEEX cancel endpoints only support live trading_mode.")
-        query: dict[str, str] = {}
-        if arguments.get("order_id"):
-            query["orderId"] = _normalize_order_id(arguments["order_id"])
-        if arguments.get("client_order_id"):
-            query["origClientOrderId"] = _normalize_client_order_id(arguments["client_order_id"])
-        if not query:
-            raise ValueError("order_id or client_order_id is required.")
+        binding = build_trade_request_binding("cancel_order", arguments)
         return _preview(
             action="cancel_order",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=_order_path(market=market, trading_mode=trading_mode),
-            query=query,
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
+            query=dict(binding["query"]),
             risk_alerts=["live_cancel_requires_confirmation"],
         )
 
@@ -287,28 +281,20 @@ class WeexTradeRestAdapter:
             if source in arguments
         ]
         if explicit_fields:
-            if "leverage" in arguments or "position_side" in arguments:
-                raise ValueError("Explicit leverage fields cannot be combined with leverage or position_side.")
-            explicit_body: dict[str, str] = {"symbol": symbol}
-            if "margin_mode" in arguments:
-                explicit_body["marginType"] = _normalize_margin_mode(arguments.get("margin_mode"))
-            requested_values: list[tuple[str, str]] = []
-            for source, target in explicit_fields:
-                value = _positive_decimal(arguments.get(source), source)
-                requested_values.append((target, value))
+            binding = build_trade_request_binding("update_leverage", arguments)
+            explicit_body = dict(binding["body"])
             symbol_rule = _find_symbol_rule(
                 self.market_adapter.get_exchange_info(market="futures", symbol=symbol),
                 symbol=symbol,
                 market="futures",
             )
-            for target, value in requested_values:
-                _validate_leverage_rule(value, symbol_rule)
-                explicit_body[target] = value
+            for _source, target in explicit_fields:
+                _validate_leverage_rule(str(explicit_body[target]), symbol_rule)
             preview = _preview(
                 action="update_leverage",
                 market=market,
                 trading_mode=trading_mode,
-                endpoint=FUTURES_LEVERAGE_PATH,
+                endpoint=str(binding["path"]),
                 body=explicit_body,
                 risk_alerts=["leverage_change_requires_confirmation"],
             )
@@ -322,7 +308,7 @@ class WeexTradeRestAdapter:
             market="futures",
         )
         _validate_leverage_rule(leverage, symbol_rule)
-        margin_mode = _normalize_margin_mode(arguments.get("margin_mode"))
+        _normalize_margin_mode(arguments.get("margin_mode"))
         current_leverages = _extract_symbol_leverages(
             self._request(
                 market="futures",
@@ -334,26 +320,19 @@ class WeexTradeRestAdapter:
             ),
             symbol=symbol,
         )
-        body: dict[str, str] = {
-            "symbol": symbol,
-            "marginType": margin_mode,
-            **current_leverages,
-        }
-        position_side = str(arguments.get("position_side") or "").strip().upper()
-        if margin_mode == "CROSSED":
-            # WEEX separated-position accounts reject cross updates unless all
-            # three leverage fields are populated with the requested value.
-            # The two isolated values are compatibility fillers and are not
-            # applied while marginType is CROSSED.
-            for field in ("crossLeverage", "isolatedLongLeverage", "isolatedShortLeverage"):
-                body[field] = leverage
-        elif position_side == "LONG":
-            body["isolatedLongLeverage"] = leverage
-        elif position_side == "SHORT":
-            body["isolatedShortLeverage"] = leverage
-        else:
-            raise ValueError("position_side must be LONG or SHORT when margin_mode=isolated.")
-        return _preview(action="update_leverage", market=market, trading_mode=trading_mode, endpoint=FUTURES_LEVERAGE_PATH, body=body, risk_alerts=["leverage_change_requires_confirmation"])
+        binding = build_trade_request_binding(
+            "update_leverage",
+            arguments,
+            current_leverages=current_leverages,
+        )
+        return _preview(
+            action="update_leverage",
+            market=market,
+            trading_mode=trading_mode,
+            endpoint=str(binding["path"]),
+            body=dict(binding["body"]),
+            risk_alerts=["leverage_change_requires_confirmation"],
+        )
 
     def confirm_leverage(self, *, execution: TradeExecution, credential: Any, credential_argument: dict[str, Any], context: TenantContext) -> dict[str, Any]:
         return self._confirm_mutation(execution=execution, expected_action="update_leverage", endpoint=FUTURES_LEVERAGE_PATH, credential=credential, credential_argument=credential_argument, context=context)
@@ -376,13 +355,16 @@ class WeexTradeRestAdapter:
             symbol=symbol,
             market="futures",
         )
-        body = {"symbol": symbol, "marginType": _normalize_margin_mode(arguments.get("margin_mode"))}
-        if arguments.get("separated_type"):
-            separated = str(arguments["separated_type"]).strip().upper()
-            if separated not in {"COMBINED", "SEPARATED"}:
-                raise ValueError("separated_type must be COMBINED or SEPARATED.")
-            body["separatedType"] = separated
-        return _preview(action="change_margin_mode", market=market, trading_mode=trading_mode, endpoint=FUTURES_MARGIN_MODE_PATH, body=body, risk_alerts=["margin_mode_change_requires_confirmation"])
+        binding = build_trade_request_binding("change_margin_mode", arguments)
+        body = dict(binding["body"])
+        return _preview(
+            action="change_margin_mode",
+            market=market,
+            trading_mode=trading_mode,
+            endpoint=str(binding["path"]),
+            body=body,
+            risk_alerts=["margin_mode_change_requires_confirmation"],
+        )
 
     def confirm_margin_mode(self, *, execution: TradeExecution, credential: Any, credential_argument: dict[str, Any], context: TenantContext) -> dict[str, Any]:
         return self._confirm_mutation(execution=execution, expected_action="change_margin_mode", endpoint=FUTURES_MARGIN_MODE_PATH, credential=credential, credential_argument=credential_argument, context=context)
@@ -400,7 +382,18 @@ class WeexTradeRestAdapter:
         market, trading_mode = _normalize_market_mode(arguments)
         if trading_mode != "live":
             raise ValueError("Extended trade mutations only support live trading_mode.")
-        builders = {
+        deferred_binding_actions = {
+            "batch_order",
+            "tp_sl",
+            "position_margin",
+            "auto_append_margin",
+        }
+        binding = (
+            None
+            if action in deferred_binding_actions
+            else build_trade_request_binding(action, arguments)
+        )
+        builders: dict[str, Callable[..., dict[str, Any]]] = {
             "batch_order": self._preview_batch_order,
             "batch_cancel": self._preview_batch_cancel,
             "cancel_scope": self._preview_cancel_scope,
@@ -414,7 +407,16 @@ class WeexTradeRestAdapter:
         builder = builders.get(action)
         if builder is None:
             raise ValueError("Unsupported trade mutation action.")
-        return builder(arguments=arguments, market=market, trading_mode=trading_mode, credential=resolved)
+        builder_arguments: dict[str, Any] = {
+            "arguments": arguments,
+            "binding": binding,
+            "credential": resolved,
+        }
+        if binding is None:
+            builder_arguments.update(
+                {"market": market, "trading_mode": trading_mode}
+            )
+        return builder(**builder_arguments)
 
     def confirm_mutation(
         self,
@@ -530,7 +532,16 @@ class WeexTradeRestAdapter:
         )
         return result
 
-    def _preview_batch_order(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
+    def _preview_batch_order(
+        self,
+        *,
+        arguments: dict[str, Any],
+        binding: None,
+        credential: Any,
+        market: str,
+        trading_mode: str,
+    ) -> dict[str, Any]:
+        del binding, credential
         raw_orders = arguments.get("orders")
         maximum = 10 if market == "spot" else 5
         if not isinstance(raw_orders, list) or not 1 <= len(raw_orders) <= maximum:
@@ -541,18 +552,30 @@ class WeexTradeRestAdapter:
         for raw_order in raw_orders:
             if not isinstance(raw_order, dict):
                 raise ValueError("Each batch order must be an object.")
-            order_arguments = {**raw_order, "market": market, "trading_mode": trading_mode}
-            body = _build_order_body(order_arguments, market=market, trading_mode=trading_mode)
+            order_arguments = {
+                **raw_order,
+                "market": market,
+                "trading_mode": trading_mode,
+            }
+            body = _build_order_body(
+                order_arguments,
+                market=market,
+                trading_mode=trading_mode,
+            )
             client_id = str(body["newClientOrderId"])
             if client_id in client_ids:
-                raise ValueError("client_order_id values must be unique within a batch.")
+                raise ValueError(
+                    "client_order_id values must be unique within a batch."
+                )
             client_ids.add(client_id)
             symbol = str(body["symbol"])
             if market == "spot":
                 if spot_symbol is None:
                     spot_symbol = symbol
                 elif symbol != spot_symbol:
-                    raise ValueError("All Spot batch orders must use the same symbol.")
+                    raise ValueError(
+                        "All Spot batch orders must use the same symbol."
+                    )
             rule = _find_symbol_rule(
                 self.market_adapter.get_exchange_info(market=market, symbol=symbol),
                 symbol=symbol,
@@ -562,78 +585,55 @@ class WeexTradeRestAdapter:
             bodies.append(body)
         if market == "spot":
             assert spot_symbol is not None
-            body = {"symbol": spot_symbol, "orderList": [{key: value for key, value in item.items() if key != "symbol"} for item in bodies]}
+            request_body = {
+                "symbol": spot_symbol,
+                "orderList": [
+                    {key: value for key, value in item.items() if key != "symbol"}
+                    for item in bodies
+                ],
+            }
             endpoint = SPOT_BATCH_ORDER_PATH
         else:
-            body = {"batchOrders": bodies}
+            request_body = {"batchOrders": bodies}
             endpoint = FUTURES_BATCH_ORDER_PATH
         return _preview(
             action="batch_order",
             market=market,
             trading_mode=trading_mode,
             endpoint=endpoint,
-            body=body,
+            body=request_body,
             risk_alerts=["batch_order_requires_confirmation", f"batch_size:{len(bodies)}"],
         )
 
-    def _preview_batch_cancel(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
-        order_ids = arguments.get("order_ids")
-        client_ids = arguments.get("client_order_ids")
-        if (order_ids is None) == (client_ids is None):
-            raise ValueError("Exactly one of order_ids or client_order_ids is required.")
-        values = order_ids if order_ids is not None else client_ids
-        if not isinstance(values, list) or not 1 <= len(values) <= 10:
-            raise ValueError("Batch cancellation accepts between 1 and 10 identifiers.")
-        if order_ids is not None:
-            normalized = [_normalize_order_id(value) for value in order_ids]
-            field = "orderIds" if market == "spot" else "orderIdList"
-        else:
-            if not isinstance(client_ids, list):
-                raise ValueError("client_order_ids must be a list.")
-            normalized = [_normalize_client_order_id(value) for value in client_ids]
-            field = "origClientOrderIds" if market == "spot" else "origClientOrderIdList"
-        if len(set(normalized)) != len(normalized):
-            raise ValueError("Batch cancellation identifiers must be unique.")
+    def _preview_batch_cancel(self, *, arguments: dict[str, Any], binding: dict[str, Any], credential: Any) -> dict[str, Any]:
+        del arguments, credential
+        body = dict(binding["body"])
+        normalized = next(iter(body.values()))
         return _preview(
             action="batch_cancel",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=SPOT_BATCH_ORDER_PATH if market == "spot" else FUTURES_BATCH_ORDER_PATH,
-            body={field: normalized},
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
+            body=body,
             risk_alerts=["batch_cancel_requires_confirmation", f"batch_size:{len(normalized)}"],
         )
 
-    def _preview_cancel_scope(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
+    def _preview_cancel_scope(self, *, arguments: dict[str, Any], binding: dict[str, Any], credential: Any) -> dict[str, Any]:
+        del credential
         order_kind = str(arguments.get("order_kind") or "").strip().lower()
         scope = str(arguments.get("scope") or "").strip().lower()
-        if order_kind not in {"normal", "conditional"} or scope not in {"symbol", "all"}:
-            raise ValueError("order_kind and scope are invalid.")
-        if market == "spot" and (order_kind != "normal" or scope != "symbol"):
-            raise ValueError("Spot scope cancellation only supports normal orders for one symbol.")
-        query: dict[str, str] = {}
-        if scope == "symbol":
-            query["symbol"] = _normalize_symbol(arguments.get("symbol"))
-            if arguments.get("acknowledge_all_symbols") not in (None, False):
-                raise ValueError("acknowledge_all_symbols is only valid for scope=all.")
-        else:
-            if market != "futures" or arguments.get("acknowledge_all_symbols") is not True or arguments.get("symbol") not in (None, ""):
-                raise ValueError("scope=all requires explicit acknowledgement and no symbol.")
-        endpoint = SPOT_CANCEL_SCOPE_PATH if market == "spot" else (
-            FUTURES_CANCEL_SCOPE_PATH if order_kind == "normal" else FUTURES_ALGO_SCOPE_PATH
-        )
         return _preview(
             action="cancel_scope",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=endpoint,
-            query=query,
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
+            query=dict(binding["query"]),
             risk_alerts=["scope_cancel_requires_confirmation", f"scope:{scope}", f"order_kind:{order_kind}"],
         )
 
-    def _preview_conditional_order(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
-        if market != "futures":
-            raise ValueError("Conditional orders only support futures.")
-        body = _build_conditional_order_body(arguments)
+    def _preview_conditional_order(self, *, arguments: dict[str, Any], binding: dict[str, Any], credential: Any) -> dict[str, Any]:
+        del arguments, credential
+        body = dict(binding["body"])
         rule = _find_symbol_rule(
             self.market_adapter.get_exchange_info(market="futures", symbol=body["symbol"]),
             symbol=body["symbol"],
@@ -647,26 +647,34 @@ class WeexTradeRestAdapter:
         _validate_trigger_price(body["triggerPrice"], "triggerPrice", rule)
         return _preview(
             action="conditional_order",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=FUTURES_ALGO_ORDER_PATH,
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
             body=body,
             risk_alerts=["conditional_order_requires_confirmation"],
         )
 
-    def _preview_conditional_cancel(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
-        if market != "futures":
-            raise ValueError("Conditional cancellation only supports futures.")
+    def _preview_conditional_cancel(self, *, arguments: dict[str, Any], binding: dict[str, Any], credential: Any) -> dict[str, Any]:
+        del arguments, credential
         return _preview(
             action="conditional_cancel",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=FUTURES_ALGO_ORDER_PATH,
-            query={"orderId": _normalize_order_id(arguments.get("order_id"))},
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
+            query=dict(binding["query"]),
             risk_alerts=["conditional_cancel_requires_confirmation"],
         )
 
-    def _preview_tp_sl(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
+    def _preview_tp_sl(
+        self,
+        *,
+        arguments: dict[str, Any],
+        binding: None,
+        credential: Any,
+        market: str,
+        trading_mode: str,
+    ) -> dict[str, Any]:
+        del binding, credential
         if market != "futures":
             raise ValueError("Standalone TP/SL only supports futures.")
         operation = str(arguments.get("operation") or "").strip().lower()
@@ -699,36 +707,30 @@ class WeexTradeRestAdapter:
             risk_alerts=["tp_sl_mutation_requires_confirmation", f"operation:{operation}"],
         )
 
-    def _preview_close_positions(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
-        if market != "futures":
-            raise ValueError("Position close only supports futures.")
+    def _preview_close_positions(self, *, arguments: dict[str, Any], binding: dict[str, Any], credential: Any) -> dict[str, Any]:
         scope = str(arguments.get("scope") or "").strip().lower()
-        body: dict[str, Any] = {}
-        if scope == "position":
-            body["positionId"] = _normalize_order_id(arguments.get("position_id"))
-            if arguments.get("symbol") not in (None, ""):
-                body["symbol"] = _normalize_symbol(arguments["symbol"])
-        elif scope == "symbol":
-            body["symbol"] = _normalize_symbol(arguments.get("symbol"))
-            if arguments.get("position_id") not in (None, ""):
-                raise ValueError("scope=symbol does not accept position_id.")
-        elif scope == "all":
-            if arguments.get("acknowledge_all_positions") is not True or any(arguments.get(field) not in (None, "") for field in ("position_id", "symbol")):
-                raise ValueError("scope=all requires explicit acknowledgement and no position selector.")
-        else:
-            raise ValueError("scope must be position, symbol, or all.")
+        body = dict(binding["body"])
         positions = self._load_positions(credential)
         _validate_position_scope(positions, scope=scope, body=body)
         return _preview(
             action="close_positions",
-            market=market,
-            trading_mode=trading_mode,
-            endpoint=FUTURES_CLOSE_POSITIONS_PATH,
+            market=str(binding["market"]),
+            trading_mode=str(binding["trading_mode"]),
+            endpoint=str(binding["path"]),
             body=body,
             risk_alerts=["close_positions_requires_confirmation", f"scope:{scope}"],
         )
 
-    def _preview_position_margin(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
+    def _preview_position_margin(
+        self,
+        *,
+        arguments: dict[str, Any],
+        binding: None,
+        credential: Any,
+        market: str,
+        trading_mode: str,
+    ) -> dict[str, Any]:
+        del binding
         if market != "futures":
             raise ValueError("Position margin adjustment only supports futures.")
         position_id = _normalize_order_id(arguments.get("isolated_position_id"))
@@ -754,7 +756,16 @@ class WeexTradeRestAdapter:
             risk_alerts=["position_margin_requires_confirmation", f"adjustment:{adjustment}"],
         )
 
-    def _preview_auto_append_margin(self, *, arguments: dict[str, Any], market: str, trading_mode: str, credential: Any) -> dict[str, Any]:
+    def _preview_auto_append_margin(
+        self,
+        *,
+        arguments: dict[str, Any],
+        binding: None,
+        credential: Any,
+        market: str,
+        trading_mode: str,
+    ) -> dict[str, Any]:
+        del binding
         if market != "futures":
             raise ValueError("Auto-append margin only supports futures.")
         position_id = _normalize_order_id(arguments.get("position_id"))
@@ -1218,6 +1229,320 @@ def _build_order_body(arguments: dict[str, Any], *, market: str, trading_mode: s
             if working_type not in (None, ""):
                 body[working_target] = _normalize_enum(working_type, {"MARK_PRICE", "CONTRACT_PRICE"}, working_source)
     return body
+
+
+def build_trade_request_binding(
+    action: str,
+    arguments: dict[str, Any],
+    *,
+    current_leverages: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build one credential-free Trade wire binding without live facts or I/O."""
+
+    market, trading_mode = _normalize_market_mode(arguments)
+    query: dict[str, Any] = {}
+    body: dict[str, Any] = {}
+
+    if action == "order":
+        if market == "spot" and trading_mode == "demo":
+            raise ValueError("Spot demo orders are not supported by the WEEX API catalog.")
+        body = _build_order_body(arguments, market=market, trading_mode=trading_mode)
+        method = "POST"
+        path = _order_path(market=market, trading_mode=trading_mode)
+    elif action == "cancel_order":
+        if trading_mode != "live":
+            raise ValueError("WEEX cancel endpoints only support live trading_mode.")
+        if arguments.get("order_id") not in (None, ""):
+            query["orderId"] = _normalize_order_id(arguments["order_id"])
+        if arguments.get("client_order_id") not in (None, ""):
+            query["origClientOrderId"] = _normalize_client_order_id(
+                arguments["client_order_id"]
+            )
+        if not query:
+            raise ValueError("order_id or client_order_id is required.")
+        method = "DELETE"
+        path = _order_path(market=market, trading_mode=trading_mode)
+    elif action == "update_leverage":
+        if market != "futures" or trading_mode != "live":
+            raise ValueError("Leverage endpoint only supports live futures.")
+        symbol = _normalize_symbol(arguments.get("symbol"))
+        explicit_fields = [
+            (source, target)
+            for source, target in _EXPLICIT_LEVERAGE_FIELD_MAP
+            if source in arguments
+        ]
+        if explicit_fields:
+            if "leverage" in arguments or "position_side" in arguments:
+                raise ValueError(
+                    "Explicit leverage fields cannot be combined with leverage or position_side."
+                )
+            body = {"symbol": symbol}
+            if "margin_mode" in arguments:
+                body["marginType"] = _normalize_margin_mode(
+                    arguments.get("margin_mode")
+                )
+            for source, target in explicit_fields:
+                body[target] = _positive_decimal(arguments.get(source), source)
+        else:
+            if current_leverages is None:
+                raise TradeRequestBindingRequiresLiveState(
+                    "Simple leverage description requires current symbol leverage state."
+                )
+            leverage = _positive_decimal(arguments.get("leverage"), "leverage")
+            margin_mode = _normalize_margin_mode(arguments.get("margin_mode"))
+            body = {
+                "symbol": symbol,
+                "marginType": margin_mode,
+                **current_leverages,
+            }
+            position_side = str(arguments.get("position_side") or "").strip().upper()
+            if margin_mode == "CROSSED":
+                for field in (
+                    "crossLeverage",
+                    "isolatedLongLeverage",
+                    "isolatedShortLeverage",
+                ):
+                    body[field] = leverage
+            elif position_side == "LONG":
+                body["isolatedLongLeverage"] = leverage
+            elif position_side == "SHORT":
+                body["isolatedShortLeverage"] = leverage
+            else:
+                raise ValueError(
+                    "position_side must be LONG or SHORT when margin_mode=isolated."
+                )
+        method = "POST"
+        path = FUTURES_LEVERAGE_PATH
+    elif action == "change_margin_mode":
+        if market != "futures" or trading_mode != "live":
+            raise ValueError("Margin mode endpoint only supports live futures.")
+        body = {
+            "symbol": _normalize_symbol(arguments.get("symbol")),
+            "marginType": _normalize_margin_mode(arguments.get("margin_mode")),
+        }
+        if arguments.get("separated_type") not in (None, ""):
+            separated = str(arguments["separated_type"]).strip().upper()
+            if separated not in {"COMBINED", "SEPARATED"}:
+                raise ValueError("separated_type must be COMBINED or SEPARATED.")
+            body["separatedType"] = separated
+        method = "POST"
+        path = FUTURES_MARGIN_MODE_PATH
+    else:
+        if trading_mode != "live":
+            raise ValueError("Extended trade mutations only support live trading_mode.")
+        if action == "batch_order":
+            raw_orders = arguments.get("orders")
+            maximum = 10 if market == "spot" else 5
+            if not isinstance(raw_orders, list) or not 1 <= len(raw_orders) <= maximum:
+                raise ValueError(f"orders must contain between 1 and {maximum} items.")
+            bodies: list[dict[str, Any]] = []
+            seen_client_ids: set[str] = set()
+            spot_symbol: str | None = None
+            for raw_order in raw_orders:
+                if not isinstance(raw_order, dict):
+                    raise ValueError("Each batch order must be an object.")
+                order_body = _build_order_body(
+                    {**raw_order, "market": market, "trading_mode": trading_mode},
+                    market=market,
+                    trading_mode=trading_mode,
+                )
+                client_id = str(order_body["newClientOrderId"])
+                if client_id in seen_client_ids:
+                    raise ValueError(
+                        "client_order_id values must be unique within a batch."
+                    )
+                seen_client_ids.add(client_id)
+                if market == "spot":
+                    symbol = str(order_body["symbol"])
+                    if spot_symbol is None:
+                        spot_symbol = symbol
+                    elif symbol != spot_symbol:
+                        raise ValueError(
+                            "All Spot batch orders must use the same symbol."
+                        )
+                bodies.append(order_body)
+            if market == "spot":
+                assert spot_symbol is not None
+                body = {
+                    "symbol": spot_symbol,
+                    "orderList": [
+                        {key: value for key, value in item.items() if key != "symbol"}
+                        for item in bodies
+                    ],
+                }
+                path = SPOT_BATCH_ORDER_PATH
+            else:
+                body = {"batchOrders": bodies}
+                path = FUTURES_BATCH_ORDER_PATH
+        elif action == "batch_cancel":
+            order_ids = arguments.get("order_ids")
+            client_ids = arguments.get("client_order_ids")
+            if (order_ids is None) == (client_ids is None):
+                raise ValueError(
+                    "Exactly one of order_ids or client_order_ids is required."
+                )
+            values = order_ids if order_ids is not None else client_ids
+            if not isinstance(values, list) or not 1 <= len(values) <= 10:
+                raise ValueError(
+                    "Batch cancellation accepts between 1 and 10 identifiers."
+                )
+            if order_ids is not None:
+                normalized = [_normalize_order_id(value) for value in order_ids]
+                field = "orderIds" if market == "spot" else "orderIdList"
+            else:
+                assert isinstance(client_ids, list)
+                normalized = [
+                    _normalize_client_order_id(value) for value in client_ids
+                ]
+                field = (
+                    "origClientOrderIds"
+                    if market == "spot"
+                    else "origClientOrderIdList"
+                )
+            if len(set(normalized)) != len(normalized):
+                raise ValueError(
+                    "Batch cancellation identifiers must be unique."
+                )
+            body = {field: normalized}
+            path = (
+                SPOT_BATCH_ORDER_PATH
+                if market == "spot"
+                else FUTURES_BATCH_ORDER_PATH
+            )
+        elif action == "cancel_scope":
+            order_kind = str(arguments.get("order_kind") or "").strip().lower()
+            scope = str(arguments.get("scope") or "").strip().lower()
+            if order_kind not in {"normal", "conditional"} or scope not in {
+                "symbol",
+                "all",
+            }:
+                raise ValueError("order_kind and scope are invalid.")
+            if market == "spot" and (order_kind != "normal" or scope != "symbol"):
+                raise ValueError(
+                    "Spot scope cancellation only supports normal orders for one symbol."
+                )
+            if scope == "symbol":
+                query["symbol"] = _normalize_symbol(arguments.get("symbol"))
+                if arguments.get("acknowledge_all_symbols") not in (None, False):
+                    raise ValueError(
+                        "acknowledge_all_symbols is only valid for scope=all."
+                    )
+            elif (
+                market != "futures"
+                or arguments.get("acknowledge_all_symbols") is not True
+                or arguments.get("symbol") not in (None, "")
+            ):
+                raise ValueError(
+                    "scope=all requires explicit acknowledgement and no symbol."
+                )
+            path = (
+                SPOT_CANCEL_SCOPE_PATH
+                if market == "spot"
+                else FUTURES_CANCEL_SCOPE_PATH
+                if order_kind == "normal"
+                else FUTURES_ALGO_SCOPE_PATH
+            )
+        elif action == "conditional_order":
+            if market != "futures":
+                raise ValueError("Conditional orders only support futures.")
+            body = _build_conditional_order_body(arguments)
+            path = FUTURES_ALGO_ORDER_PATH
+        elif action == "conditional_cancel":
+            if market != "futures":
+                raise ValueError("Conditional cancellation only supports futures.")
+            query = {"orderId": _normalize_order_id(arguments.get("order_id"))}
+            path = FUTURES_ALGO_ORDER_PATH
+        elif action == "tp_sl":
+            if market != "futures":
+                raise ValueError("Standalone TP/SL only supports futures.")
+            operation = str(arguments.get("operation") or "").strip().lower()
+            if operation == "place":
+                body = _build_tp_sl_place_body(arguments)
+                if body.get("quantity") in (None, "0") and arguments.get(
+                    "acknowledge_full_position"
+                ) is not True:
+                    raise ValueError(
+                        "Full-position TP/SL requires explicit acknowledgement."
+                    )
+                path = FUTURES_PLACE_TP_SL_PATH
+            elif operation == "modify":
+                body = _build_tp_sl_modify_body(arguments)
+                path = FUTURES_MODIFY_TP_SL_PATH
+            else:
+                raise ValueError("operation must be place or modify.")
+        elif action == "close_positions":
+            if market != "futures":
+                raise ValueError("Position close only supports futures.")
+            scope = str(arguments.get("scope") or "").strip().lower()
+            if scope == "position":
+                body["positionId"] = _normalize_order_id(
+                    arguments.get("position_id")
+                )
+                if arguments.get("symbol") not in (None, ""):
+                    body["symbol"] = _normalize_symbol(arguments["symbol"])
+            elif scope == "symbol":
+                body["symbol"] = _normalize_symbol(arguments.get("symbol"))
+                if arguments.get("position_id") not in (None, ""):
+                    raise ValueError("scope=symbol does not accept position_id.")
+            elif scope == "all":
+                if arguments.get("acknowledge_all_positions") is not True or any(
+                    arguments.get(field) not in (None, "")
+                    for field in ("position_id", "symbol")
+                ):
+                    raise ValueError(
+                        "scope=all requires explicit acknowledgement and no position selector."
+                    )
+            else:
+                raise ValueError("scope must be position, symbol, or all.")
+            path = FUTURES_CLOSE_POSITIONS_PATH
+        elif action == "position_margin":
+            if market != "futures":
+                raise ValueError(
+                    "Position margin adjustment only supports futures."
+                )
+            adjustment = str(arguments.get("adjustment") or "").strip().lower()
+            if adjustment not in {"increase", "decrease"}:
+                raise ValueError("adjustment must be increase or decrease.")
+            body = {
+                "isolatedPositionId": _normalize_order_id(
+                    arguments.get("isolated_position_id")
+                ),
+                "amount": _positive_decimal(arguments.get("amount"), "amount"),
+                "type": 1 if adjustment == "increase" else 2,
+            }
+            path = FUTURES_POSITION_MARGIN_PATH
+        elif action == "auto_append_margin":
+            if market != "futures":
+                raise ValueError("Auto-append margin only supports futures.")
+            enabled = arguments.get("enabled")
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean.")
+            body = {
+                "positionId": _normalize_order_id(arguments.get("position_id")),
+                "autoAppendMargin": enabled,
+            }
+            path = FUTURES_AUTO_APPEND_MARGIN_PATH
+        else:
+            raise ValueError("Unsupported trade mutation action.")
+        method, binding_field = _mutation_transport(
+            action=action,
+            market=market,
+            endpoint=path,
+        )
+        if binding_field == "request_query" and body:
+            raise ValueError("Trade request binding is invalid.")
+        if binding_field == "request_body" and query:
+            raise ValueError("Trade request binding is invalid.")
+
+    return {
+        "action": action,
+        "market": market,
+        "trading_mode": trading_mode,
+        "method": method,
+        "path": path,
+        "query": query,
+        "body": body,
+    }
 
 
 def _validate_execution_order(market: str, trading_mode: str, endpoint: str, body: dict[str, Any]) -> None:
