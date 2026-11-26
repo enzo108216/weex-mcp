@@ -492,6 +492,276 @@ class OmittedTradeAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0]["method"], "DELETE")
         self.assertEqual(json.loads(calls[0]["data"]), {"orderIdList": ["1"]})
 
+    def test_spot_batch_cancel_accepts_client_id_only_items_with_exact_coverage(self):
+        from weex_mcp.trade_execution import TradeExecution
+
+        adapter, provider = self._adapter(
+            lambda prepared, timeout: json.dumps(
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-b", "status": "CANCELED"},
+                        {"origClientOrderId": "client-a", "status": "CANCELED"},
+                    ]
+                }
+            ).encode()
+        )
+        result = adapter.confirm_mutation(
+            execution=TradeExecution(
+                action="batch_cancel",
+                market="spot",
+                trading_mode="live",
+                summary={
+                    "action": "batch_cancel",
+                    "market": "spot",
+                    "trading_mode": "live",
+                    "endpoint": "/api/v3/order/batch",
+                    "request_body": {"origClientOrderIds": ["client-a", "client-b"]},
+                },
+                risk={"status": "review_required"},
+                risk_signature="risk",
+            ),
+            credential=self._resolved(provider, self._context()),
+            credential_argument=credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["all_succeeded"])
+        self.assertEqual(
+            [item["client_order_id"] for item in result["items"]],
+            ["client-a", "client-b"],
+        )
+        self.assertTrue(all("order_id" not in item for item in result["items"]))
+        self.assertEqual(result["_outcome"]["class"], "accepted")
+        self.assertEqual(
+            [item["class"] for item in result["_outcome"]["items"]],
+            ["accepted", "accepted"],
+        )
+
+    def test_spot_batch_cancel_client_only_success_preserves_partial_outcomes(self):
+        from weex_mcp.trade_execution import TradeExecution
+
+        adapter, provider = self._adapter(
+            lambda prepared, timeout: json.dumps(
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-a", "status": "CANCELED"},
+                        {
+                            "origClientOrderId": "client-b",
+                            "status": "REJECTED",
+                            "errorCode": "E",
+                            "errorMsg": "rejected",
+                        },
+                    ]
+                }
+            ).encode()
+        )
+        result = adapter.confirm_mutation(
+            execution=TradeExecution(
+                action="batch_cancel",
+                market="spot",
+                trading_mode="live",
+                summary={
+                    "action": "batch_cancel",
+                    "market": "spot",
+                    "trading_mode": "live",
+                    "endpoint": "/api/v3/order/batch",
+                    "request_body": {"origClientOrderIds": ["client-a", "client-b"]},
+                },
+                risk={"status": "review_required"},
+                risk_signature="risk",
+            ),
+            credential=self._resolved(provider, self._context()),
+            credential_argument=credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertFalse(result["all_succeeded"])
+        self.assertEqual(result["succeeded_count"], 1)
+        self.assertEqual(result["failed_count"], 1)
+        self.assertEqual(result["_outcome"]["class"], "partial")
+        self.assertEqual(
+            [item["class"] for item in result["_outcome"]["items"]],
+            ["accepted", "definitive_rejection"],
+        )
+
+    def test_spot_batch_cancel_client_items_still_require_exact_request_coverage(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
+        from weex_mcp.trade_execution import TradeExecution
+
+        cases = [
+            (
+                {"origClientOrderIds": ["client-a"]},
+                {"orderList": [{"status": "CANCELED"}]},
+            ),
+            (
+                {"origClientOrderIds": ["client-a"]},
+                {
+                    "orderList": [
+                        {"origClientOrderId": "different-client", "status": "CANCELED"}
+                    ]
+                },
+            ),
+            (
+                {"origClientOrderIds": ["client-a"]},
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-a", "status": "NEW"}
+                    ]
+                },
+            ),
+            (
+                {"origClientOrderIds": ["client-a", "client-b"]},
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-a", "status": "CANCELED"},
+                        {"origClientOrderId": "client-a", "status": "CANCELED"},
+                    ]
+                },
+            ),
+            (
+                {"origClientOrderIds": ["client-a", "client-b"]},
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-a", "status": "CANCELED"}
+                    ]
+                },
+            ),
+            (
+                {"orderIds": ["1"]},
+                {
+                    "orderList": [
+                        {"origClientOrderId": "client-a", "status": "CANCELED"}
+                    ]
+                },
+            ),
+        ]
+
+        for request_body, response in cases:
+            with self.subTest(request_body=request_body, response=response):
+                adapter, provider = self._adapter(
+                    lambda prepared, timeout, response=response: json.dumps(response).encode()
+                )
+                with self.assertRaises(TradeMutationError) as raised:
+                    adapter.confirm_mutation(
+                        execution=TradeExecution(
+                            action="batch_cancel",
+                            market="spot",
+                            trading_mode="live",
+                            summary={
+                                "action": "batch_cancel",
+                                "market": "spot",
+                                "trading_mode": "live",
+                                "endpoint": "/api/v3/order/batch",
+                                "request_body": request_body,
+                            },
+                            risk={"status": "review_required"},
+                            risk_signature="risk",
+                        ),
+                        credential=self._resolved(provider, self._context()),
+                        credential_argument=credential_argument(),
+                        context=self._context(),
+                    )
+
+                self.assertEqual(raised.exception.outcome_class, "unknown")
+
+    def test_spot_scope_cancel_accepts_the_observed_order_id_response(self):
+        from weex_mcp.trade_execution import TradeExecution
+
+        adapter, provider = self._adapter(
+            lambda prepared, timeout: json.dumps(
+                [{"orderId": "1", "status": "CANCELED"}]
+            ).encode()
+        )
+        result = adapter.confirm_mutation(
+            execution=TradeExecution(
+                action="cancel_scope",
+                market="spot",
+                trading_mode="live",
+                summary={
+                    "action": "cancel_scope",
+                    "market": "spot",
+                    "trading_mode": "live",
+                    "endpoint": "/api/v3/openOrders",
+                    "request_query": {"symbol": "BTCUSDT"},
+                },
+                risk={"status": "review_required"},
+                risk_signature="risk",
+            ),
+            credential=self._resolved(provider, self._context()),
+            credential_argument=credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["items"], [{"ok": True, "order_id": "1"}])
+
+    def test_spot_scope_cancel_does_not_inherit_batch_client_id_relaxation(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
+        from weex_mcp.trade_execution import TradeExecution
+
+        adapter, provider = self._adapter(
+            lambda prepared, timeout: json.dumps(
+                [{"origClientOrderId": "client-a", "status": "CANCELED"}]
+            ).encode()
+        )
+
+        with self.assertRaises(TradeMutationError) as raised:
+            adapter.confirm_mutation(
+                execution=TradeExecution(
+                    action="cancel_scope",
+                    market="spot",
+                    trading_mode="live",
+                    summary={
+                        "action": "cancel_scope",
+                        "market": "spot",
+                        "trading_mode": "live",
+                        "endpoint": "/api/v3/openOrders",
+                        "request_query": {"symbol": "BTCUSDT"},
+                    },
+                    risk={"status": "review_required"},
+                    risk_signature="risk",
+                ),
+                credential=self._resolved(provider, self._context()),
+                credential_argument=credential_argument(),
+                context=self._context(),
+            )
+
+        self.assertEqual(raised.exception.outcome_class, "unknown")
+
+    def test_futures_batch_cancel_does_not_inherit_spot_client_id_relaxation(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
+        from weex_mcp.trade_execution import TradeExecution
+
+        adapter, provider = self._adapter(
+            lambda prepared, timeout: json.dumps(
+                [{"clientOrderId": "client-a", "success": True}]
+            ).encode()
+        )
+
+        with self.assertRaises(TradeMutationError) as raised:
+            adapter.confirm_mutation(
+                execution=TradeExecution(
+                    action="batch_cancel",
+                    market="futures",
+                    trading_mode="live",
+                    summary={
+                        "action": "batch_cancel",
+                        "market": "futures",
+                        "trading_mode": "live",
+                        "endpoint": "/capi/v3/batchOrders",
+                        "request_body": {"origClientOrderIdList": ["client-a"]},
+                    },
+                    risk={"status": "review_required"},
+                    risk_signature="risk",
+                ),
+                credential=self._resolved(provider, self._context()),
+                credential_argument=credential_argument(),
+                context=self._context(),
+            )
+
+        self.assertEqual(raised.exception.outcome_class, "unknown")
+
     def test_unknown_action_endpoint_and_demo_fail_before_write(self):
         from weex_mcp.adapters.trade_guard import TradeMutationError
         from weex_mcp.trade_execution import TradeExecution

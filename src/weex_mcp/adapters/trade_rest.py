@@ -2132,13 +2132,16 @@ def _normalized_item_result(
     success: bool,
     order_id_field: str = "orderId",
     client_id_field: str = "clientOrderId",
+    allow_client_id_only_success: bool = False,
 ) -> dict[str, Any]:
     if success:
         order_id = _optional_str(item.get(order_id_field))
-        if not order_id:
-            raise WeexRestBusinessError(code="invalid_response", message="WEEX mutation success item lacked an order ID.", payload=item)
-        result: dict[str, Any] = {"ok": True, "order_id": order_id}
         client_id = _optional_str(item.get(client_id_field) or item.get("origClientOrderId"))
+        if not order_id and not (allow_client_id_only_success and client_id):
+            raise WeexRestBusinessError(code="invalid_response", message="WEEX mutation success item lacked an order ID.", payload=item)
+        result: dict[str, Any] = {"ok": True}
+        if order_id:
+            result["order_id"] = order_id
         if client_id:
             result["client_order_id"] = client_id
         position_id = _optional_str(item.get("positionId"))
@@ -2236,11 +2239,19 @@ def _normalize_mutation_result(
                 )
             else:
                 success = item.get("success") is True if market == "futures" else (
-                    str(item.get("status") or "").upper() in {"CANCELED", "CANCELLED"} and item.get("orderId") not in (None, "")
+                    str(item.get("status") or "").upper() in {"CANCELED", "CANCELLED"}
+                    and any(
+                        item.get(field) not in (None, "")
+                        for field in ("orderId", "origClientOrderId", "clientOrderId")
+                    )
                 )
             if market == "futures" and item.get("success") not in {True, False}:
                 raise WeexRestBusinessError(code="invalid_response", message="WEEX batch item lacked a success boolean.", payload=payload)
-            item_result = _normalized_item_result(item, success=success)
+            item_result = _normalized_item_result(
+                item,
+                success=success,
+                allow_client_id_only_success=market == "spot" and action == "batch_cancel",
+            )
             item_result[
                 "requested_order_id" if identity_kind == "order_id" else "client_order_id"
             ] = requested_identifier
