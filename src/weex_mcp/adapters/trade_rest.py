@@ -1922,20 +1922,22 @@ def _normalize_cancel_confirm_result(
     result_payload = _extract_mapping_payload(payload)
     _raise_if_trade_rejected(payload, result_payload)
     status = str(result_payload.get("status") or "").upper()
+    returned_order_id = _optional_str(result_payload.get("orderId"))
+    returned_client_order_id = _optional_str(
+        result_payload.get("origClientOrderId") or result_payload.get("clientOrderId")
+    )
     if market == "futures":
         success = result_payload.get("success") is True
     else:
-        success = status in {"CANCELED", "CANCELLED"} and result_payload.get("orderId") not in (None, "")
+        success = status in {"CANCELED", "CANCELLED"} and bool(
+            returned_order_id or returned_client_order_id
+        )
     if not success:
         raise WeexRestBusinessError(
             code="invalid_response",
             message="WEEX cancel response did not confirm cancellation.",
             payload=payload,
         )
-    returned_order_id = _optional_str(result_payload.get("orderId"))
-    returned_client_order_id = _optional_str(
-        result_payload.get("origClientOrderId") or result_payload.get("clientOrderId")
-    )
     requested_order_id = _optional_str(request_query.get("orderId"))
     requested_client_order_id = _optional_str(request_query.get("origClientOrderId"))
     if requested_order_id and returned_order_id != requested_order_id:

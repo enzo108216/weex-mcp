@@ -779,6 +779,67 @@ class TradeRestCompleteTests(unittest.TestCase):
         self.assertEqual(result["client_order_id"], "client-1")
         self.assertIsNone(result["exchange_order_id"])
 
+    def test_spot_cancel_by_client_id_accepts_staging_identity_only_response(self):
+        captured = {}
+        adapter = self._adapter(
+            {
+                "origClientOrderId": "client-1",
+                "status": "CANCELED",
+            },
+            captured,
+        )
+        preview = adapter.preview_cancel_order(
+            arguments={
+                "market": "spot",
+                "trading_mode": "live",
+                "client_order_id": "client-1",
+            },
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+
+        result = adapter.confirm_cancel_order(
+            execution=self._preview_record(preview, market="spot", trading_mode="live"),
+            credential=self._credential(),
+            credential_argument=self._credential_argument(),
+            context=self._context(),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["client_order_id"], "client-1")
+        self.assertIsNone(result["exchange_order_id"])
+
+    def test_spot_cancel_client_id_only_response_still_requires_matching_identity(self):
+        from weex_mcp.adapters.trade_guard import TradeMutationError
+
+        for response in (
+            {"status": "CANCELED"},
+            {"origClientOrderId": "different-client", "status": "CANCELED"},
+        ):
+            with self.subTest(response=response):
+                adapter = self._adapter(response, {})
+                preview = adapter.preview_cancel_order(
+                    arguments={
+                        "market": "spot",
+                        "trading_mode": "live",
+                        "client_order_id": "client-1",
+                    },
+                    credential=self._credential(),
+                    credential_argument=self._credential_argument(),
+                    context=self._context(),
+                )
+
+                with self.assertRaises(TradeMutationError) as raised:
+                    adapter.confirm_cancel_order(
+                        execution=self._preview_record(preview, market="spot", trading_mode="live"),
+                        credential=self._credential(),
+                        credential_argument=self._credential_argument(),
+                        context=self._context(),
+                    )
+
+                self.assertEqual(raised.exception.outcome_class, "unknown")
+
     def test_futures_leverage_requires_requested_leverage_evidence(self):
         captured = {}
         adapter = self._adapter({"data": {"symbol": "BTCUSDT"}}, captured)
